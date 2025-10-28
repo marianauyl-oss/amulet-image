@@ -1,8 +1,15 @@
+# ===== Core Flask Stack =====
 Flask==3.0.3
 Flask-SQLAlchemy==3.1.1
 Flask-Cors==4.0.0
-gunicorn==22.0.0
 python-dotenv==1.0.1
-SQLAlchemy==2.0.44
+gunicorn==22.0.0
+
+# ===== Database Drivers =====
+# psycopg[binary] підтримує Python 3.13 і PostgreSQL
 psycopg[binary]==3.2.3
-psycopg2-binary==2.9.9
+SQLAlchemy==2.0.44
+
+# ===== Optional Utilities =====
+typing_extensions==4.12.2
+packaging==25.0
