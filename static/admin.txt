@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="x-ua-compatible" content="ie=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Amulet Admin Pro</title>
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+<body class="bg-body">
+  <header class="topbar">
+    <div class="container">
+      <div class="brand">Amulet Admin Pro</div>
+      <div class="meta">
+        <span class="pill pill-ok" id="authStatus">🔐 Admin</span>
+      </div>
+    </div>
+  </header>
+
+  <nav id="nav" class="nav">
+    <div class="container nav-inner">
+      <button class="tab active" data-tab="licenses">Ліцензії</button>
+      <button class="tab" data-tab="apikeys">API Keys</button>
+      <button class="tab" data-tab="config">Конфіг</button>
+      <button class="tab" data-tab="prices">Ціни моделей</button>
+      <button class="tab" data-tab="logs">Логи</button>
+    </div>
+  </nav>
+
+  <main class="container">
+
+    <!-- Licenses -->
+    <section id="view-licenses" class="view">
+      <div class="card">
+        <div class="card-head">
+          <h2>Ліцензії</h2>
+        </div>
+        <div class="grid-2">
+          <form id="addLicenseForm" class="form card">
+            <h3>Додати ліцензію</h3>
+            <label class="field">
+              <span>Ключ</span>
+              <input type="text" name="key" placeholder="XXXX-XXXX-XXXX" required />
+            </label>
+            <label class="field">
+              <span>Кредити</span>
+              <input type="number" name="credit" min="0" value="0" />
+            </label>
+            <label class="field">
+              <span>Статус</span>
+              <select name="status">
+                <option value="active">active</option>
+                <option value="inactive">inactive</option>
+              </select>
+            </label>
+            <button class="btn btn-primary" type="submit">Додати</button>
+          </form>
+
+          <div class="table-wrap card">
+            <div class="table-head">
+              <div class="left">
+                <h3>Список</h3>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table id="licensesTable" class="table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Key</th>
+                    <th>MAC</th>
+                    <th>Status</th>
+                    <th>Credit</th>
+                    <th>Last Active</th>
+                    <th>Дії</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td colspan="7">—</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- API Keys -->
+    <section id="view-apikeys" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>API Keys</h2>
+        </div>
+        <div class="grid-2">
+          <form id="addApiKeyForm" class="form card">
+            <h3>Додати API Key</h3>
+            <label class="field">
+              <span>API Key</span>
+              <input type="text" name="api_key" placeholder="******" required />
+            </label>
+            <label class="field">
+              <span>Статус</span>
+              <select name="status">
+                <option value="active">active</option>
+                <option value="inactive">inactive</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Примітка</span>
+              <textarea name="note" rows="3" placeholder="необов’язково"></textarea>
+            </label>
+            <button class="btn btn-primary" type="submit">Додати</button>
+          </form>
+
+          <div class="table-wrap card">
+            <div class="table-head">
+              <div class="left">
+                <h3>Список</h3>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table id="apiKeysTable" class="table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>API Key</th>
+                    <th>Status</th>
+                    <th>In Use</th>
+                    <th>Last Used</th>
+                    <th>Note</th>
+                    <th>Дії</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td colspan="7">—</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- Config -->
+    <section id="view-config" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>Конфігурація (оновлення / тех.роботи)</h2>
+        </div>
+        <form id="configForm" class="form">
+          <div class="grid-3">
+            <label class="field">
+              <span>Остання версія</span>
+              <input type="text" name="latest_version" placeholder="2.3.3" />
+            </label>
+            <label class="field check">
+              <input type="checkbox" name="force_update" />
+              <span>Примусове оновлення</span>
+            </label>
+            <label class="field check">
+              <input type="checkbox" name="maintenance" />
+              <span>Технічні роботи</span>
+            </label>
+          </div>
+
+          <label class="field">
+            <span>Повідомлення (maintenance)</span>
+            <textarea name="maintenance_message" rows="2" placeholder="Текст повідомлення…"></textarea>
+          </label>
+
+          <label class="field">
+            <span>Посилання на оновлення (JSON масив або комами)</span>
+            <textarea name="update_links" rows="2" placeholder='["https://..."]'></textarea>
+          </label>
+
+          <label class="field">
+            <span>Опис оновлення</span>
+            <textarea name="update_description" rows="4" placeholder="Короткі тези…"></textarea>
+          </label>
+
+          <div class="actions">
+            <button class="btn btn-primary" type="submit">Зберегти</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- Prices -->
+    <section id="view-prices" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>Ціни моделей</h2>
+        </div>
+
+        <div class="grid-2">
+          <form id="addPriceForm" class="form card">
+            <h3>Додати / Оновити ціну</h3>
+            <label class="field">
+              <span>Модель</span>
+              <input type="text" name="model" placeholder="seedream-v4" required />
+            </label>
+            <label class="field">
+              <span>Ціна (кредитів)</span>
+              <input type="number" name="price" min="1" step="1" value="1" required />
+            </label>
+            <button class="btn btn-primary" type="submit">Зберегти</button>
+            <button class="btn btn-secondary" type="button" id="syncDefaultPrices">Синхронізувати дефолти</button>
+          </form>
+
+          <div class="table-wrap card">
+            <div class="table-head">
+              <div class="left">
+                <h3>Список</h3>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table id="pricesTable" class="table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Model</th>
+                    <th>Price</th>
+                    <th>Updated</th>
+                    <th>Дії</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td colspan="5">—</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- Logs -->
+    <section id="view-logs" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>Логи</h2>
+        </div>
+        <div class="table-wrap">
+          <div class="table-scroll">
+            <table id="logsTable" class="table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Action</th>
+                  <th>Details</th>
+                  <th>Created</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td colspan="4">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="/admin.js"></script>
+</body>
+</html>

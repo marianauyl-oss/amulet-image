@@ -1,31 +1,111 @@
+/* Amulet Admin Pro — Light High-Contrast */
 :root{
-  --bg:#f7fafc; --card:#fff; --fg:#0b1021; --muted:#475569; --border:#e2e8f0;
-  --accent:#2563eb; --accent-soft:#eff6ff; --ok:#16a34a; --warn:#f59e0b; --danger:#dc2626;
+  --bg:#f7fafc;
+  --card:#ffffff;
+  --fg:#0b1021;
+  --muted:#475569;
+  --border:#e2e8f0;
+  --accent:#2563eb;
+  --accent-soft:#eff6ff;
+  --success:#16a34a;
+  --warning:#f59e0b;
+  --danger:#dc2626;
+  --shadow:0 1px 2px rgba(2,6,23,0.06),0 8px 24px rgba(2,6,23,0.08);
 }
-body.bg-body{background:var(--bg); color:var(--fg); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";}
-.container{max-width:1100px; margin:40px auto; padding:0 16px;}
-h1{margin:0 0 16px 0;}
-.capsules{display:flex; gap:8px; margin-bottom:16px;}
-.cap{padding:6px 12px; border-radius:999px; font-weight:800; font-size:14px;}
-.cap-ok{background:var(--ok); color:#fff;}
-.cap-info{background:var(--accent); color:#fff;}
 
-.tabs{display:flex; list-style:none; padding:0; margin:0 0 14px 0; gap:6px;}
-.tabs li{background:#e5ecff; color:#1e2a55; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:800;}
-.tabs li.active{background:var(--accent); color:#fff;}
+*{box-sizing:border-box}
+html,body{height:100%}
+body.bg-body{
+  margin:0;font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+  color:var(--fg);background:var(--bg);
+}
 
-.tab{display:none; background:var(--card); border:1px solid var(--border); border-radius:14px; padding:14px;}
-.tab.active{display:block;}
+/* Layout */
+.container{max-width:1180px;margin:0 auto;padding:0 16px}
+.topbar{background:var(--card);border-bottom:1px solid var(--border)}
+.topbar .container{display:flex;align-items:center;justify-content:space-between;height:58px}
+.brand{font-weight:900;letter-spacing:.3px}
+.meta{display:flex;gap:10px;align-items:center}
 
-.row{display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px;}
-.input{padding:10px 12px; border:1px solid var(--border); border-radius:10px; min-width:160px;}
-textarea.input{min-width:100%; min-height:90px;}
-.btn{padding:10px 14px; border-radius:10px; border:1px solid var(--border); background:#eef2ff; font-weight:800; cursor:pointer;}
-.btn-primary{background:var(--ok); color:#fff; border:none;}
-.btn-warn{background:#fde68a; color:#111827; border:none;}
+.pill{display:inline-block;border-radius:999px;padding:6px 10px;font-weight:800;font-size:13px}
+.pill-ok{background:var(--accent);color:#fff}
 
-.table{width:100%; border-collapse:collapse; margin-top:8px;}
-.table th, .table td{border-bottom:1px solid var(--border); padding:8px; font-size:14px;}
-.table tbody tr:hover{background:var(--accent-soft);}
-.badge-del{background:var(--danger); color:#fff; padding:6px 10px; border-radius:8px; cursor:pointer; display:inline-block;}
-kbd{background:#111827; color:#fff; padding:2px 6px; border-radius:6px; font-size:12px;}
+.nav{background:var(--accent-soft);border-bottom:1px solid var(--border)}
+.nav-inner{display:flex;gap:8px;align-items:center;height:54px}
+.nav .tab{
+  appearance:none;border:1px solid var(--border);background:#fff;
+  padding:8px 14px;border-radius:10px;font-weight:800;color:var(--muted);cursor:pointer;
+}
+.nav .tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.nav .tab:hover{filter:brightness(.98)}
+
+main{padding:18px 0 48px}
+.view.hidden{display:none}
+
+/* Cards */
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:14px;
+  box-shadow:var(--shadow);padding:16px;margin-bottom:16px;
+}
+.card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.card h2{margin:8px 0 4px 0;font-size:22px}
+.card h3{margin:0 0 10px 0;font-size:18px}
+
+/* Forms */
+.form .field{display:flex;flex-direction:column;margin-bottom:12px}
+.form .field > span{font-size:13px;color:var(--muted);font-weight:700;margin-bottom:6px}
+.form input[type="text"],
+.form input[type="number"],
+.form textarea,
+.form select{
+  border:1px solid var(--border);background:#fff;border-radius:10px;padding:10px 12px;
+  font-weight:700;color:var(--fg);outline:none;
+}
+.form textarea{resize:vertical}
+.form .field.check{flex-direction:row;gap:10px;align-items:center}
+.form .actions{display:flex;gap:10px}
+
+.grid-2{display:grid;grid-template-columns:1fr 1.4fr;gap:16px}
+.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+@media (max-width:1024px){.grid-2,.grid-3{grid-template-columns:1fr}}
+@media (max-width:640px){.nav-inner{flex-wrap:wrap;height:auto;padding:10px 0}}
+
+/* Buttons */
+.btn{
+  appearance:none;border:1px solid var(--border);background:#fff;color:var(--fg);
+  border-radius:10px;padding:10px 14px;font-weight:900;cursor:pointer;
+}
+.btn:hover{filter:brightness(.98)}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-secondary{background:#1118270d;border-color:var(--border);color:var(--fg)}
+.btn-danger{background:var(--danger);border-color:var(--danger);color:#fff}
+
+/* Badges */
+.badge{
+  display:inline-block;min-width:64px;text-align:center;font-size:12px;
+  border-radius:999px;padding:4px 8px;font-weight:900;
+}
+.badge.ok{background:var(--success);color:#fff}
+.badge.bad{background:var(--danger);color:#fff}
+
+/* Tables */
+.table-wrap{overflow:hidden}
+.table-head{display:flex;align-items:center;justify-content:space-between;margin:4px 0 10px}
+.table-scroll{overflow:auto;border:1px solid var(--border);border-radius:12px;background:#fff}
+.table{width:100%;border-collapse:separate;border-spacing:0}
+.table thead th{
+  position:sticky;top:0;background:#fff;border-bottom:1px solid var(--border);
+  padding:10px 12px;text-align:left;font-size:13px;color:var(--muted)
+}
+.table tbody td{padding:10px 12px;border-top:1px solid var(--border);vertical-align:middle}
+.table code{background:#0b122005;border:1px dashed var(--border);border-radius:8px;padding:2px 6px}
+
+/* Inputs in table */
+.price-input{
+  width:120px;border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-weight:800
+}
+
+/* Utility */
+.error{color:var(--danger);font-weight:800}
+.small{font-size:12px;color:var(--muted)}

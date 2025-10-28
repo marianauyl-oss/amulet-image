@@ -1,257 +1,333 @@
+// static/admin.js
+// Amulet Admin Pro — Licenses / API Keys / Config / Prices / Logs (без Voices)
+
 (function () {
-  const $ = (sel) => document.querySelector(sel);
-  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+  const $ = (sel, root = document) => root.querySelector(sel);
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-  // Tabs
-  $$("#tabs li").forEach(li => {
-    li.addEventListener("click", () => {
-      $$("#tabs li").forEach(x => x.classList.remove("active"));
-      $$(".tab").forEach(x => x.classList.remove("active"));
-      li.classList.add("active");
-      $("#" + li.dataset.tab).classList.add("active");
-    });
-  });
+  const state = { tab: 'licenses' };
 
-  // Helpers
-  const setInfo = (msg) => $("#caps-info").textContent = msg || "Ready";
-
-  async function api(url, opts = {}) {
-    const res = await fetch(url, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
-    if (!res.ok) throw new Error(res.status + " " + res.statusText);
-    return res.json();
+  async function fetchJSON(url, opts = {}) {
+    const res = await fetch(url, Object.assign({
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+    }, opts));
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
+    }
+    const ct = res.headers.get('content-type') || '';
+    return ct.includes('application/json') ? res.json() : res.text();
   }
 
-  // Auth check
-  api("/admin_api/login").then(() => {
-    $("#caps-auth").textContent = "AUTH OK";
-  }).catch(() => {
-    $("#caps-auth").textContent = "AUTH FAILED";
-  });
+  function escapeHtml(s) {
+    return String(s ?? '')
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+  }
 
-  // ---------------- Licenses ----------------
+  function toast(msg, type = 'info') {
+    let box = $('#toast');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'toast';
+      Object.assign(box.style, {
+        position: 'fixed', right: '16px', top: '16px', zIndex: 9999,
+        maxWidth: '520px', color: '#fff', fontWeight: 800,
+        background: '#2563eb', padding: '12px 14px', borderRadius: '10px',
+        boxShadow: '0 6px 24px rgba(0,0,0,.25)', transition: 'opacity .3s',
+      });
+      document.body.appendChild(box);
+    }
+    const colors = { info: '#2563eb', ok: '#16a34a', warn: '#f59e0b', error: '#dc2626' };
+    box.style.background = colors[type] || colors.info;
+    box.textContent = msg;
+    box.style.opacity = '1';
+    setTimeout(() => { box.style.opacity = '0'; }, 2200);
+  }
+
+  // ===== Tabs =====
+  function bindTabs() {
+    $$('#nav .tab').forEach(btn => {
+      btn.addEventListener('click', () => setTab(btn.dataset.tab));
+    });
+  }
+  function setTab(tab) {
+    state.tab = tab;
+    $$('#nav .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    $$('.view').forEach(v => v.classList.toggle('hidden', v.id !== `view-${tab}`));
+    if (tab === 'licenses') loadLicenses();
+    else if (tab === 'apikeys') loadApiKeys();
+    else if (tab === 'config') loadConfig();
+    else if (tab === 'prices') loadPrices();
+    else if (tab === 'logs') loadLogs();
+  }
+
+  // ===== Licenses =====
   async function loadLicenses() {
-    const q = ($("#lic-q").value || "").trim();
-    const minc = ($("#lic-min").value || "").trim();
-    const maxc = ($("#lic-max").value || "").trim();
-    const params = new URLSearchParams();
-    if (q) params.set("q", q);
-    if (minc) params.set("min_credit", minc);
-    if (maxc) params.set("max_credit", maxc);
-    const data = await api("/admin_api/licenses?" + params.toString());
-    const tbody = $("#lic-table tbody");
-    tbody.innerHTML = "";
-    (data.items || []).forEach(it => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${it.id}</td>
-        <td><code>${it.key}</code></td>
-        <td>${it.mac_id || ""}</td>
-        <td>${it.status}</td>
-        <td>${it.credit}</td>
-        <td>${it.last_active || ""}</td>
-        <td><span class="badge-del" data-id="${it.id}">Delete</span></td>
-      `;
-      tbody.appendChild(tr);
-    });
-    tbody.querySelectorAll(".badge-del").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        const id = btn.dataset.id;
-        if (!confirm("Delete license id=" + id + "?")) return;
-        const res = await fetch("/admin_api/licenses/" + id, { method: "DELETE" });
-        if (!res.ok) return alert("Delete failed");
-        loadLicenses();
+    const tbody = $('#licensesTable tbody');
+    tbody.innerHTML = '<tr><td colspan="7">Завантаження…</td></tr>';
+    try {
+      const j = await fetchJSON('/admin_api/licenses');
+      tbody.innerHTML = '';
+      (j.items || []).forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${row.id}</td>
+          <td><code>${escapeHtml(row.key)}</code></td>
+          <td>${row.mac_id ? `<small>${escapeHtml(row.mac_id)}</small>` : '—'}</td>
+          <td><span class="badge ${row.status === 'active' ? 'ok' : 'bad'}">${row.status}</span></td>
+          <td><b>${row.credit}</b></td>
+          <td>${row.last_active ? new Date(row.last_active).toLocaleString() : '—'}</td>
+          <td><button class="btn btn-danger" data-id="${row.id}">Видалити</button></td>
+        `;
+        tbody.appendChild(tr);
       });
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="7" class="error">${escapeHtml(e.message)}</td></tr>`;
+    }
+  }
+
+  function bindLicenseForm() {
+    const form = $('#addLicenseForm');
+    if (!form) return;
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const key = form.key.value.trim();
+      const credit = parseInt(form.credit.value || '0', 10) || 0;
+      const status = form.status.value || 'active';
+      if (!key) { toast('Введіть ключ', 'warn'); return; }
+      try {
+        const r = await fetchJSON('/admin_api/licenses', { method: 'POST', body: JSON.stringify({ key, credit, status }) });
+        if (r.ok) { toast('Ліцензію додано', 'ok'); form.reset(); loadLicenses(); }
+      } catch (e) { toast(e.message, 'error'); }
+    });
+
+    $('#licensesTable').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button.btn-danger');
+      if (!btn) return;
+      const id = btn.dataset.id;
+      if (!confirm('Видалити ліцензію?')) return;
+      try {
+        const r = await fetchJSON(`/admin_api/licenses/${id}`, { method: 'DELETE' });
+        if (r.ok) { toast('Видалено', 'ok'); loadLicenses(); }
+      } catch (e) { toast(e.message, 'error'); }
     });
   }
-  $("#lic-refresh").addEventListener("click", () => loadLicenses());
-  $("#lic-save").addEventListener("click", async () => {
-    const body = {
-      key: $("#lic-key").value.trim(),
-      mac_id: $("#lic-mac").value.trim(),
-      credit: parseInt($("#lic-credit").value || "0", 10),
-      status: $("#lic-status").value
-    };
-    if (!body.key) return alert("key is required");
-    try {
-      const res = await api("/admin_api/licenses", { method: "POST", body: JSON.stringify(body) });
-      if (!res.ok) throw new Error(res.msg || "fail");
-      setInfo("License saved");
-      loadLicenses();
-    } catch (e) {
-      alert(e.message);
-    }
-  });
-  loadLicenses();
 
-  // ---------------- API Keys ----------------
+  // ===== API Keys =====
   async function loadApiKeys() {
-    const q = ($("#api-q").value || "").trim();
-    const st = $("#api-status-filter").value;
-    const params = new URLSearchParams();
-    if (q) params.set("q", q);
-    if (st) params.set("status", st);
-    const data = await api("/admin_api/apikeys?" + params.toString());
-    const tbody = $("#api-table tbody");
-    tbody.innerHTML = "";
-    (data.items || []).forEach(it => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${it.id}</td>
-        <td><code>${it.api_key}</code></td>
-        <td>${it.status}</td>
-        <td>${it.in_use ? "yes" : "no"}</td>
-        <td>${it.last_used || ""}</td>
-        <td>${it.note || ""}</td>
-        <td><span class="badge-del" data-id="${it.id}">Delete</span></td>
-      `;
-      tbody.appendChild(tr);
-    });
-    tbody.querySelectorAll(".badge-del").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        const id = btn.dataset.id;
-        if (!confirm("Delete API key id=" + id + "?")) return;
-        const res = await fetch("/admin_api/apikeys/" + id, { method: "DELETE" });
-        if (!res.ok) return alert("Delete failed");
-        loadApiKeys();
+    const tbody = $('#apiKeysTable tbody');
+    tbody.innerHTML = '<tr><td colspan="7">Завантаження…</td></tr>';
+    try {
+      const j = await fetchJSON('/admin_api/apikeys');
+      tbody.innerHTML = '';
+      (j.items || []).forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${row.id}</td>
+          <td><code>${escapeHtml(row.api_key)}</code></td>
+          <td><span class="badge ${row.status === 'active' ? 'ok' : 'bad'}">${row.status}</span></td>
+          <td>${row.in_use ? '<b>YES</b>' : 'no'}</td>
+          <td>${row.last_used ? new Date(row.last_used).toLocaleString() : '—'}</td>
+          <td>${row.note ? escapeHtml(row.note) : '—'}</td>
+          <td>
+            <button class="btn btn-secondary" data-act="toggle" data-id="${row.id}">${row.in_use ? 'Відпустити' : 'Зайняти'}</button>
+            <button class="btn btn-danger" data-act="del" data-id="${row.id}">Видалити</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
       });
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="7" class="error">${escapeHtml(e.message)}</td></tr>`;
+    }
+  }
+
+  function bindApiKeyForm() {
+    const form = $('#addApiKeyForm');
+    if (!form) return;
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const api_key = form.api_key.value.trim();
+      const status = form.status.value || 'active';
+      const note = form.note.value.trim();
+      if (!api_key) { toast('Введіть API ключ', 'warn'); return; }
+      try {
+        const r = await fetchJSON('/admin_api/apikeys', { method: 'POST', body: JSON.stringify({ api_key, status, note }) });
+        if (r.ok) { toast('API ключ додано', 'ok'); form.reset(); loadApiKeys(); }
+      } catch (e) { toast(e.message, 'error'); }
+    });
+
+    $('#apiKeysTable').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button');
+      if (!btn) return;
+      const id = btn.dataset.id;
+      const act = btn.dataset.act;
+      try {
+        if (act === 'toggle') {
+          const r = await fetchJSON(`/admin_api/apikeys/${id}/toggle_use`, { method: 'POST' });
+          if (r.ok) { toast('Статус змінено', 'ok'); loadApiKeys(); }
+        } else if (act === 'del') {
+          if (!confirm('Видалити цей API ключ?')) return;
+          const r = await fetchJSON(`/admin_api/apikeys/${id}`, { method: 'DELETE' });
+          if (r.ok) { toast('Видалено', 'ok'); loadApiKeys(); }
+        }
+      } catch (e) { toast(e.message, 'error'); }
     });
   }
-  $("#api-refresh").addEventListener("click", () => loadApiKeys());
-  $("#api-status-filter").addEventListener("change", () => loadApiKeys());
-  $("#api-add").addEventListener("click", async () => {
-    const body = {
-      api_key: $("#api-key").value.trim(),
-      status: $("#api-status").value,
-      note: $("#api-note").value.trim()
-    };
-    if (!body.api_key) return alert("API key is required");
-    try {
-      const res = await api("/admin_api/apikeys", { method: "POST", body: JSON.stringify(body) });
-      if (!res.ok) throw new Error(res.msg || "fail");
-      setInfo("API key added");
-      $("#api-key").value = "";
-      loadApiKeys();
-    } catch (e) {
-      alert(e.message);
-    }
-  });
-  $("#api-bulk-add").addEventListener("click", async () => {
-    const text = $("#api-bulk-text").value;
-    if (!text.trim()) return alert("Paste keys first");
-    const body = {
-      bulk_text: text,
-      status: $("#api-bulk-status").value,
-      note: $("#api-bulk-note").value.trim()
-    };
-    try {
-      const res = await api("/admin_api/apikeys", { method: "POST", body: JSON.stringify(body) });
-      if (!res.ok) throw new Error(res.msg || "fail");
-      setInfo(`Bulk added: ${res.added}, skipped: ${res.skipped}`);
-      $("#api-bulk-text").value = "";
-      loadApiKeys();
-    } catch (e) {
-      alert(e.message);
-    }
-  });
-  $("#api-file-upload").addEventListener("click", async () => {
-    const file = $("#api-file").files[0];
-    if (!file) return alert("Choose .txt file");
-    const form = new FormData();
-    form.append("file", file);
-    form.append("status", $("#api-file-status").value);
-    form.append("note", $("#api-file-note").value.trim());
-    const res = await fetch("/admin_api/apikeys/bulk_file", { method: "POST", body: form });
-    if (!res.ok) return alert("Upload failed");
-    const data = await res.json();
-    setInfo(`Uploaded: added ${data.added}, skipped ${data.skipped}`);
-    $("#api-file").value = "";
-    loadApiKeys();
-  });
-  loadApiKeys();
 
-  // ---------------- Prices ----------------
-  async function loadPrices() {
-    const data = await api("/admin_api/prices");
-    const tbody = $("#price-table tbody");
-    tbody.innerHTML = "";
-    (data.items || []).forEach(it => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `
-        <td>${it.id}</td>
-        <td><code>${it.model}</code></td>
-        <td><input data-model="${it.model}" class="input" value="${it.price}" style="width:100px"/></td>
-      `;
-      tbody.appendChild(tr);
-    });
-  }
-  $("#price-refresh").addEventListener("click", () => loadPrices());
-  $("#price-save").addEventListener("click", async () => {
-    const inputs = $$("#price-table input[data-model]");
-    const payload = [];
-    inputs.forEach(inp => {
-      const p = parseInt(inp.value || "0", 10);
-      if (Number.isFinite(p) && p > 0) payload.push({ model: inp.dataset.model, price: p });
-    });
-    try {
-      const res = await api("/admin_api/prices", { method: "POST", body: JSON.stringify({ prices: payload }) });
-      if (!res.ok) throw new Error(res.msg || "fail");
-      setInfo("Prices saved");
-      loadPrices();
-    } catch (e) {
-      alert(e.message);
-    }
-  });
-  loadPrices();
-
-  // ---------------- Config ----------------
+  // ===== Config =====
   async function loadConfig() {
-    const data = await api("/admin_api/config");
-    const c = data.config || {};
-    $("#cfg-version").value = c.latest_version || "";
-    $("#cfg-force").checked = !!c.force_update;
-    $("#cfg-maint").checked = !!c.maintenance;
-    $("#cfg-message").value = c.maintenance_message || "";
-    $("#cfg-links").value = JSON.stringify(c.update_links || [], null, 2);
-    $("#cfg-desc").value = c.update_description || "";
+    const form = $('#configForm');
+    if (!form) return;
+    form.reset();
+    try {
+      const j = await fetchJSON('/admin_api/config');
+      const c = j.config || {};
+      form.latest_version.value = c.latest_version || '';
+      form.force_update.checked = !!c.force_update;
+      form.maintenance.checked = !!c.maintenance;
+      form.maintenance_message.value = c.maintenance_message || '';
+      form.update_links.value = Array.isArray(c.update_links) ? JSON.stringify(c.update_links) : (c.update_links || '[]');
+      form.update_description.value = c.update_description || '';
+    } catch (e) { toast(e.message, 'error'); }
   }
-  $("#cfg-refresh").addEventListener("click", () => loadConfig());
-  $("#cfg-save").addEventListener("click", async () => {
-    let links;
-    try {
-      links = JSON.parse($("#cfg-links").value || "[]");
-      if (!Array.isArray(links)) links = [];
-    } catch (_) { links = []; }
-    const body = {
-      latest_version: $("#cfg-version").value.trim(),
-      force_update: $("#cfg-force").checked,
-      maintenance: $("#cfg-maint").checked,
-      maintenance_message: $("#cfg-message").value.trim(),
-      update_links: links,
-      update_description: $("#cfg-desc").value.trim()
-    };
-    try {
-      const res = await api("/admin_api/config", { method: "POST", body: JSON.stringify(body) });
-      if (!res.ok) throw new Error(res.msg || "fail");
-      setInfo("Config saved");
-      loadConfig();
-    } catch (e) {
-      alert(e.message);
-    }
-  });
-  loadConfig();
 
-  // ---------------- Logs ----------------
-  async function loadLogs() {
-    const data = await api("/admin_api/logs");
-    const tbody = $("#logs-table tbody");
-    tbody.innerHTML = "";
-    (data.items || []).forEach(it => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `<td>${it.id}</td><td>${it.when || ""}</td><td>${it.action}</td><td>${(it.details || "").replaceAll("<","&lt;")}</td>`;
-      tbody.appendChild(tr);
+  function bindConfigForm() {
+    const form = $('#configForm');
+    if (!form) return;
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      let links = form.update_links.value.trim();
+      try {
+        links = links ? JSON.parse(links) : [];
+        if (!Array.isArray(links)) links = [];
+      } catch {
+        // дозволимо також строку з комами
+        links = form.update_links.value.split(',').map(s => s.trim()).filter(Boolean);
+      }
+      const payload = {
+        latest_version: form.latest_version.value.trim(),
+        force_update: form.force_update.checked,
+        maintenance: form.maintenance.checked,
+        maintenance_message: form.maintenance_message.value.trim(),
+        update_links: links,
+        update_description: form.update_description.value.trim(),
+      };
+      try {
+        const r = await fetchJSON('/admin_api/config', { method: 'POST', body: JSON.stringify(payload) });
+        if (r.ok) { toast('Конфіг збережено', 'ok'); loadConfig(); }
+      } catch (e) { toast(e.message, 'error'); }
     });
   }
-  $("#logs-refresh").addEventListener("click", () => loadLogs());
-  loadLogs();
 
+  // ===== Prices =====
+  async function loadPrices() {
+    const tbody = $('#pricesTable tbody');
+    tbody.innerHTML = '<tr><td colspan="5">Завантаження…</td></tr>';
+    try {
+      const j = await fetchJSON('/admin_api/prices');
+      tbody.innerHTML = '';
+      (j.items || j.prices || []).forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${row.id ?? ''}</td>
+          <td><code>${escapeHtml(row.model)}</code></td>
+          <td><input type="number" min="1" step="1" class="price-input" data-id="${row.id ?? ''}" data-model="${escapeHtml(row.model)}" value="${row.price}"></td>
+          <td>${row.updated_at ? new Date(row.updated_at).toLocaleString() : '—'}</td>
+          <td>
+            <button class="btn btn-primary" data-act="save" data-id="${row.id ?? ''}" data-model="${escapeHtml(row.model)}">Зберегти</button>
+            <button class="btn btn-danger" data-act="del" data-id="${row.id ?? ''}" ${row.id ? '' : 'disabled'}>Видалити</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="5" class="error">${escapeHtml(e.message)}</td></tr>`;
+    }
+  }
+
+  function bindPricesForm() {
+    const form = $('#addPriceForm');
+    if (form) {
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const model = form.model.value.trim();
+        const price = parseInt(form.price.value || '0', 10) || 0;
+        if (!model || price < 1) { toast('Модель і ціна обовʼязкові', 'warn'); return; }
+        try {
+          const r = await fetchJSON('/admin_api/prices', { method: 'POST', body: JSON.stringify({ model, price }) });
+          if (r.ok) { toast('Ціну додано/оновлено', 'ok'); form.reset(); loadPrices(); }
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    }
+
+    $('#pricesTable').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button');
+      if (!btn) return;
+      const act = btn.dataset.act;
+      const id = btn.dataset.id;
+      const model = btn.dataset.model;
+      if (act === 'save') {
+        const input = $(`.price-input[data-model="${CSS.escape(model)}"]`);
+        const price = parseInt(input?.value || '0', 10) || 0;
+        if (price < 1) { toast('Ціна має бути ≥ 1', 'warn'); return; }
+        try {
+          const r = await fetchJSON('/admin_api/prices', { method: 'POST', body: JSON.stringify({ model, price }) });
+          if (r.ok) { toast('Збережено', 'ok'); loadPrices(); }
+        } catch (e) { toast(e.message, 'error'); }
+      } else if (act === 'del' && id) {
+        if (!confirm('Видалити запис ціни?')) return;
+        try {
+          const r = await fetchJSON(`/admin_api/prices/${id}`, { method: 'DELETE' });
+          if (r.ok) { toast('Видалено', 'ok'); loadPrices(); }
+        } catch (e) { toast(e.message, 'error'); }
+      }
+    });
+
+    const syncBtn = $('#syncDefaultPrices');
+    if (syncBtn) {
+      syncBtn.addEventListener('click', async () => {
+        if (!confirm('Підтягнути дефолтні ціни (оновить/додасть стандартні моделі)?')) return;
+        try {
+          const r = await fetchJSON('/admin_api/prices/sync_defaults', { method: 'POST' });
+          if (r.ok) { toast('Синхронізовано', 'ok'); loadPrices(); }
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    }
+  }
+
+  // ===== Logs =====
+  async function loadLogs() {
+    const tbody = $('#logsTable tbody');
+    tbody.innerHTML = '<tr><td colspan="4">Завантаження…</td></tr>';
+    try {
+      const j = await fetchJSON('/admin_api/logs');
+      tbody.innerHTML = '';
+      (j.items || []).forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${row.id}</td>
+          <td>${row.action}</td>
+          <td>${row.details ? `<code>${escapeHtml(row.details)}</code>` : '—'}</td>
+          <td>${row.created_at ? new Date(row.created_at).toLocaleString() : '—'}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="4" class="error">${escapeHtml(e.message)}</td></tr>`;
+    }
+  }
+
+  // ===== Init =====
+  function init() {
+    bindTabs();
+    bindLicenseForm();
+    bindApiKeyForm();
+    bindConfigForm();
+    bindPricesForm();
+    setTab(state.tab);
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
 })();

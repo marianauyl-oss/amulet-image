@@ -1,218 +1,112 @@
+# app.py
 # -*- coding: utf-8 -*-
 import os
-import hmac
-from datetime import datetime
-from functools import wraps
+import base64
+from datetime import datetime, timezone
+from hmac import compare_digest
 
-from flask import Flask, jsonify, request, Response, send_from_directory
+from flask import (
+    Flask, request, jsonify, Response, send_from_directory, send_file
+)
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from sqlalchemy import text
-from sqlalchemy import inspect
+from sqlalchemy import text, inspect
 
-# =========================
-# App & Config
-# =========================
-app = Flask(__name__, static_folder="static", static_url_path="/")
-CORS(app)
+# ======== Flask / DB ========
+app = Flask(__name__, static_url_path="", static_folder="static")
 
-# ---- DATABASE_URL (Postgres через psycopg3) ----
-_db_url = os.getenv("DATABASE_URL", "").strip()
-if not _db_url:
-    # Локальний фолбек (SQLite)
-    _db_url = "sqlite:///amulet.db"
-# Якщо це звичайний Postgres URL без драйвера — додамо драйвер psycopg
-if _db_url.startswith("postgresql://"):
-    _db_url = _db_url.replace("postgresql://", "postgresql+psycopg://", 1)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-app.config["SQLALCHEMY_DATABASE_URI"] = _db_url
+# DATABASE_URL: приклад:
+# postgresql://amulet_db_user:...@dpg-xxx/amulet_db
+app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
+    "DATABASE_URL",
+    "sqlite:///amulet.db"
+)
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["JSON_AS_ASCII"] = False
 
-db = SQLAlchemy(app)
+# Якщо моделі окремо — імпортуємо
+from models import db, License, ApiKey, Config, Price, ActivityLog  # noqa: E402
 
-# =========================
-# Helpers
-# =========================
+db.init_app(app)
+
+# ======== Адмін креденшли ========
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "admin")
 
-def safe_str_cmp(a, b):
-    return hmac.compare_digest(str(a), str(b))
-
-def require_admin_auth(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Basic "):
-            try:
-                import base64
-                u, p = base64.b64decode(auth.split()[1]).decode("utf-8").split(":", 1)
-            except Exception:
-                u = p = ""
-            if safe_str_cmp(u, ADMIN_USER) and safe_str_cmp(p, ADMIN_PASS):
-                return fn(*args, **kwargs)
-        return Response("Unauthorized", 401, {"WWW-Authenticate": 'Basic realm="Admin"'})
-    return wrapper
-
-def now_utc_str():
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
-# =========================
-# Models
-# =========================
-class License(db.Model):
-    __tablename__ = "license"
-    id = db.Column(db.Integer, primary_key=True)
-    key = db.Column(db.String(120), unique=True, nullable=False, index=True)
-    mac_id = db.Column(db.String(64), nullable=True, index=True)
-    status = db.Column(db.String(32), nullable=False, default="active")  # active/inactive
-    credit = db.Column(db.Integer, nullable=False, default=0)
-    last_active = db.Column(db.DateTime, nullable=True)
-    # для зворотної сумісності з UI, де інколи зверталися до license.active
-    active = db.Column(db.Boolean, nullable=False, default=True)
-    created_at = db.Column(db.DateTime, nullable=False, server_default=db.func.now())
-    updated_at = db.Column(
-        db.DateTime,
-        nullable=False,
-        server_default=db.func.now(),
-        onupdate=db.func.now()
-    )
-
-class ApiKey(db.Model):
-    __tablename__ = "apikey"
-    id = db.Column(db.Integer, primary_key=True)
-    api_key = db.Column(db.String(200), unique=True, nullable=False)
-    status = db.Column(db.String(32), nullable=False, default="active")  # active/inactive
-    in_use = db.Column(db.Boolean, nullable=False, default=False)
-    last_used = db.Column(db.DateTime, nullable=True)
-    note = db.Column(db.String(255), nullable=True)
-    created_at = db.Column(db.DateTime, nullable=False, server_default=db.func.now())
-    updated_at = db.Column(
-        db.DateTime,
-        nullable=False,
-        server_default=db.func.now(),
-        onupdate=db.func.now()
-    )
-
-class Config(db.Model):
-    __tablename__ = "config"
-    id = db.Column(db.Integer, primary_key=True)
-    latest_version = db.Column(db.String(40), nullable=False, default="2.3.3")
-    force_update = db.Column(db.Boolean, nullable=False, default=False)
-    maintenance = db.Column(db.Boolean, nullable=False, default=False)
-    maintenance_message = db.Column(db.Text, nullable=True)
-    update_description = db.Column(db.Text, nullable=True)
-    update_links = db.Column(db.Text, nullable=True)  # JSON text
-    created_at = db.Column(db.DateTime, nullable=False, server_default=db.func.now())
-    updated_at = db.Column(
-        db.DateTime,
-        nullable=False,
-        server_default=db.func.now(),
-        onupdate=db.func.now()
-    )
-
-class Price(db.Model):
-    __tablename__ = "price"
-    id = db.Column(db.Integer, primary_key=True)
-    model = db.Column(db.String(80), unique=True, nullable=False, index=True)
-    price = db.Column(db.Integer, nullable=False, default=1)
-    updated_at = db.Column(
-        db.DateTime,
-        nullable=False,
-        server_default=db.func.now(),
-        onupdate=db.func.now()
-    )
-
-class ActivityLog(db.Model):
-    __tablename__ = "activitylog"
-    id = db.Column(db.Integer, primary_key=True)
-    action = db.Column(db.String(120), nullable=False)
-    details = db.Column(db.Text, nullable=True)
-    ip = db.Column(db.String(64), nullable=True)
-    created_at = db.Column(db.DateTime, nullable=False, server_default=db.func.now())
-
-# =========================
-# Auto schema ensure (Postgres)
-# =========================
-def _ensure_column(table: str, col_sql: str):
-    """
-    Безпечне додавання колонки, якщо її немає.
-    col_sql — фрагмент "ADD COLUMN ..." без слова ALTER TABLE.
-    """
+def _basic_auth_ok(req) -> bool:
+    auth = req.headers.get("Authorization", "")
+    if not auth.startswith("Basic "):
+        return False
     try:
-        db.session.execute(text(f'ALTER TABLE "{table}" {col_sql}'))
-        db.session.commit()
+        raw = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8", "ignore")
+        username, password = raw.split(":", 1)
     except Exception:
-        db.session.rollback()
+        return False
+    return (
+        compare_digest(str(username or ""), str(ADMIN_USER or "")) and
+        compare_digest(str(password or ""), str(ADMIN_PASS or ""))
+    )
+
+def _require_admin():
+    if not _basic_auth_ok(request):
+        return Response("Unauthorized", 401, {"WWW-Authenticate": 'Basic realm="admin"'})
+    return None
+
+# ======== Авто-міграції (легкі) ========
+def _ensure_columns_exist():
+    """Додає прості колонки в існуючих таблицях, якщо їх нема (PostgreSQL)."""
+    eng = db.engine
+    insp = inspect(eng)
+
+    def has_table(tname: str) -> bool:
+        try:
+            insp.get_columns(tname)
+            return True
+        except Exception:
+            return False
+
+    def ensure(table: str, colname: str, ddl_sql: str):
+        if not has_table(table):
+            return
+        cols = {c["name"] for c in insp.get_columns(table)}
+        if colname not in cols:
+            with eng.connect() as con:
+                con.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl_sql};"))
+                con.commit()
+
+    # config.updated_at
+    ensure("config", "updated_at", "updated_at TIMESTAMPTZ DEFAULT now()")
+    # price.updated_at
+    ensure("price", "updated_at", "updated_at TIMESTAMPTZ DEFAULT now()")
+    # api_key.in_use / api_key.note (на випадок відсутності)
+    ensure("api_key", "in_use", "in_use BOOLEAN DEFAULT FALSE")
+    ensure("api_key", "note", "note TEXT")
+    # license.last_active (якщо раптом нема)
+    ensure("license", "last_active", "last_active TIMESTAMPTZ")
 
 def _ensure_base_schema():
-    """Створює таблиці та додає відсутні колонки (особливо updated_at)."""
+    """create_all + первинна ініціалізація config та price"""
     db.create_all()
 
-    insp = inspect(db.engine)
+    # гарантія наявності колонок
+    _ensure_columns_exist()
 
-    # ----- license -----
-    if "license" in insp.get_table_names():
-        cols = {c["name"] for c in insp.get_columns("license")}
-        if "active" not in cols:
-            _ensure_column("license", 'ADD COLUMN active BOOLEAN NOT NULL DEFAULT TRUE')
-        if "created_at" not in cols:
-            _ensure_column("license", 'ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
-        if "updated_at" not in cols:
-            _ensure_column("license", 'ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
-
-    # ----- apikey -----
-    if "apikey" in insp.get_table_names():
-        cols = {c["name"] for c in insp.get_columns("apikey")}
-        if "in_use" not in cols:
-            _ensure_column("apikey", 'ADD COLUMN in_use BOOLEAN NOT NULL DEFAULT FALSE')
-        if "last_used" not in cols:
-            _ensure_column("apikey", 'ADD COLUMN last_used TIMESTAMPTZ')
-        if "note" not in cols:
-            _ensure_column("apikey", 'ADD COLUMN note VARCHAR(255)')
-        if "created_at" not in cols:
-            _ensure_column("apikey", 'ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
-        if "updated_at" not in cols:
-            _ensure_column("apikey", 'ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
-
-    # ----- config -----
-    if "config" in insp.get_table_names():
-        cols = {c["name"] for c in insp.get_columns("config")}
-        if "latest_version" not in cols:
-            _ensure_column("config", 'ADD COLUMN latest_version VARCHAR(40) NOT NULL DEFAULT \'2.3.3\'')
-        if "force_update" not in cols:
-            _ensure_column("config", 'ADD COLUMN force_update BOOLEAN NOT NULL DEFAULT FALSE')
-        if "maintenance" not in cols:
-            _ensure_column("config", 'ADD COLUMN maintenance BOOLEAN NOT NULL DEFAULT FALSE')
-        if "maintenance_message" not in cols:
-            _ensure_column("config", 'ADD COLUMN maintenance_message TEXT')
-        if "update_description" not in cols:
-            _ensure_column("config", 'ADD COLUMN update_description TEXT')
-        if "update_links" not in cols:
-            _ensure_column("config", 'ADD COLUMN update_links TEXT')
-        if "created_at" not in cols:
-            _ensure_column("config", 'ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
-        if "updated_at" not in cols:
-            _ensure_column("config", 'ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
-
-    # ----- price -----
-    if "price" in insp.get_table_names():
-        cols = {c["name"] for c in insp.get_columns("price")}
-        if "updated_at" not in cols:
-            _ensure_column("price", 'ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()')
-
-    # ---- seed defaults ----
+    # CONFIG (єдиний рядок)
     if not Config.query.first():
-        db.session.add(Config(
+        cfg = Config(
             latest_version="2.3.3",
             force_update=False,
             maintenance=False,
             maintenance_message="",
+            update_links="[]",
             update_description="",
-            update_links="[]"
-        ))
-        db.session.commit()
+            updated_at=datetime.now(timezone.utc),
+        )
+        db.session.add(cfg)
 
+    # PRICES (якщо порожньо — піднімаємо дефолт)
     if Price.query.count() == 0:
         defaults = {
             "seedream-v4": 1,
@@ -222,309 +116,386 @@ def _ensure_base_schema():
             "imagen3": 2,
             "classic-fast": 1,
         }
-        db.session.add_all([Price(model=m, price=v) for m, v in defaults.items()])
-        db.session.commit()
+        for model_id, val in defaults.items():
+            db.session.add(Price(
+                model=model_id,
+                price=int(val),
+                updated_at=datetime.now(timezone.utc),
+            ))
+    db.session.commit()
 
-# =========================
-# Routes — UI
-# =========================
-@app.route("/")
-def root_ok():
-    return jsonify(ok=True, service="Amulet Image Backend", time=now_utc_str())
+with app.app_context():
+    _ensure_base_schema()
 
-@app.route("/admin")
-def admin_page():
-    # віддаємо static/admin.html
-    return send_from_directory(app.static_folder, "admin.html")
+# ======== Сервінг адмінки ========
+@app.get("/")
+def root():
+    return send_from_directory("static", "admin.html")
 
-@app.route("/admin.css")
-def admin_css():
-    return send_from_directory(app.static_folder, "admin.css")
+@app.get("/admin")
+def admin_html():
+    return send_from_directory("static", "admin.html")
 
-@app.route("/admin.js")
+@app.get("/admin.js")
 def admin_js():
-    return send_from_directory(app.static_folder, "admin.js")
+    return send_from_directory("static", "admin.js")
 
-# =========================
-# Admin API
-# =========================
-@app.route("/admin_api/login")
-@require_admin_auth
+@app.get("/admin.css")
+def admin_css():
+    return send_from_directory("static", "admin.css")
+
+@app.get("/healthz")
+def healthz():
+    return jsonify(ok=True, time=datetime.utcnow().isoformat() + "Z")
+
+# ======== ADMIN API ========
+@app.get("/admin_api/login")
 def admin_login():
-    return jsonify(ok=True, user=ADMIN_USER)
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    return jsonify(ok=True)
 
-# ---- Licenses ----
-@app.route("/admin_api/licenses", methods=["GET"])
-@require_admin_auth
-def admin_licenses_list():
-    q = License.query.order_by(License.id.desc()).all()
+# ---- Licenses
+@app.get("/admin_api/licenses")
+def admin_list_licenses():
+    unauth = _require_admin();  # noqa: E702
+    if unauth: return unauth    # noqa: E701
+    qs = License.query.order_by(License.id.desc()).all()
     out = []
-    for x in q:
+    for x in qs:
         out.append({
             "id": x.id,
             "key": x.key,
             "mac_id": x.mac_id,
             "status": x.status,
-            "active": bool(x.active),
             "credit": x.credit,
-            "last_active": x.last_active.isoformat() if x.last_active else None,
-            "created_at": x.created_at.isoformat() if x.created_at else None,
-            "updated_at": x.updated_at.isoformat() if x.updated_at else None,
+            "last_active": x.last_active.isoformat() if x.last_active else None
         })
-    return jsonify(items=out)
+    return jsonify(ok=True, items=out)
 
-@app.route("/admin_api/licenses", methods=["POST"])
-@require_admin_auth
-def admin_license_create():
-    data = request.get_json(force=True, silent=True) or {}
-    key = (data.get("key") or "").strip()
+@app.post("/admin_api/licenses")
+def admin_add_license():
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    j = request.json or {}
+    key = str(j.get("key", "")).strip()
+    credit = int(j.get("credit", 0))
+    status = str(j.get("status", "active")).strip().lower()
     if not key:
-        return jsonify(ok=False, msg="Missing key"), 400
+        return jsonify(ok=False, msg="Key required"), 400
     if License.query.filter_by(key=key).first():
         return jsonify(ok=False, msg="Key exists"), 400
-    lic = License(
-        key=key,
-        mac_id=(data.get("mac_id") or "").strip() or None,
-        status=(data.get("status") or "active").strip(),
-        active=bool(data.get("active", True)),
-        credit=int(data.get("credit") or 0),
-        last_active=None
-    )
-    db.session.add(lic)
-    db.session.commit()
-    db.session.add(ActivityLog(action="license.create", details=f"key={key}", ip=request.remote_addr))
-    db.session.commit()
+    lic = License(key=key, credit=credit, status=status, last_active=None)
+    db.session.add(lic); db.session.commit()
     return jsonify(ok=True, id=lic.id)
 
-@app.route("/admin_api/licenses/<int:lic_id>", methods=["PATCH"])
-@require_admin_auth
-def admin_license_update(lic_id):
-    data = request.get_json(force=True, silent=True) or {}
-    lic = License.query.get_or_404(lic_id)
-    if "mac_id" in data:
-        lic.mac_id = (data.get("mac_id") or "").strip() or None
-    if "status" in data:
-        lic.status = (data.get("status") or "active").strip()
-    if "active" in data:
-        lic.active = bool(data.get("active"))
-    if "credit" in data:
-        try:
-            lic.credit = int(data.get("credit"))
-        except Exception:
-            pass
-    db.session.commit()
-    db.session.add(ActivityLog(action="license.update", details=f"id={lic_id}", ip=request.remote_addr))
-    db.session.commit()
+@app.delete("/admin_api/licenses/<int:lic_id>")
+def admin_del_license(lic_id):
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    row = License.query.get(lic_id)
+    if not row:
+        return jsonify(ok=False, msg="Not found"), 404
+    db.session.delete(row); db.session.commit()
     return jsonify(ok=True)
 
-@app.route("/admin_api/licenses/<int:lic_id>", methods=["DELETE"])
-@require_admin_auth
-def admin_license_delete(lic_id):
-    lic = License.query.get_or_404(lic_id)
-    db.session.delete(lic)
-    db.session.commit()
-    db.session.add(ActivityLog(action="license.delete", details=f"id={lic_id}", ip=request.remote_addr))
-    db.session.commit()
-    return jsonify(ok=True)
-
-# ---- API Keys ----
-@app.route("/admin_api/apikeys", methods=["GET"])
-@require_admin_auth
-def admin_apikeys_list():
-    rows = ApiKey.query.order_by(ApiKey.id.desc()).all()
+# ---- API Keys
+@app.get("/admin_api/apikeys")
+def admin_list_apikeys():
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    qs = ApiKey.query.order_by(ApiKey.id.desc()).all()
     out = []
-    for x in rows:
+    for x in qs:
         out.append({
             "id": x.id,
             "api_key": x.api_key,
             "status": x.status,
             "in_use": bool(x.in_use),
             "last_used": x.last_used.isoformat() if x.last_used else None,
-            "note": x.note,
-            "updated_at": x.updated_at.isoformat() if x.updated_at else None
+            "note": x.note or ""
         })
-    return jsonify(items=out)
+    return jsonify(ok=True, items=out)
 
-@app.route("/admin_api/apikeys", methods=["POST"])
-@require_admin_auth
-def admin_apikey_add():
-    data = request.get_json(force=True, silent=True) or {}
-    api_key = (data.get("api_key") or "").strip()
+@app.post("/admin_api/apikeys")
+def admin_add_apikey():
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    j = request.json or {}
+    api_key = str(j.get("api_key", "")).strip()
+    status = str(j.get("status", "active")).strip().lower()
+    note = str(j.get("note", "")).strip()
     if not api_key:
-        return jsonify(ok=False, msg="Missing api_key"), 400
+        return jsonify(ok=False, msg="api_key required"), 400
     if ApiKey.query.filter_by(api_key=api_key).first():
-        return jsonify(ok=False, msg="Exists"), 400
-    row = ApiKey(
-        api_key=api_key,
-        status=(data.get("status") or "active").strip(),
-        in_use=bool(data.get("in_use", False)),
-        note=(data.get("note") or "").strip() or None
-    )
-    db.session.add(row)
-    db.session.commit()
-    db.session.add(ActivityLog(action="apikey.create", details=f"key=***{api_key[-4:]}", ip=request.remote_addr))
-    db.session.commit()
+        return jsonify(ok=False, msg="Duplicate key"), 400
+    row = ApiKey(api_key=api_key, status=status, in_use=False, note=note, last_used=None)
+    db.session.add(row); db.session.commit()
     return jsonify(ok=True, id=row.id)
 
-@app.route("/admin_api/apikeys/<int:row_id>", methods=["PATCH"])
-@require_admin_auth
-def admin_apikey_update(row_id):
-    data = request.get_json(force=True, silent=True) or {}
-    row = ApiKey.query.get_or_404(row_id)
-    if "status" in data:
-        row.status = (data.get("status") or "active").strip()
-    if "in_use" in data:
-        row.in_use = bool(data.get("in_use"))
-    if "note" in data:
-        row.note = (data.get("note") or "").strip() or None
+@app.post("/admin_api/apikeys/<int:pk>/toggle_use")
+def admin_toggle_api_use(pk):
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    row = ApiKey.query.get(pk)
+    if not row:
+        return jsonify(ok=False, msg="Not found"), 404
+    row.in_use = not bool(row.in_use)
+    row.last_used = datetime.now(timezone.utc)
     db.session.commit()
-    db.session.add(ActivityLog(action="apikey.update", details=f"id={row_id}", ip=request.remote_addr))
-    db.session.commit()
+    return jsonify(ok=True, in_use=bool(row.in_use))
+
+@app.delete("/admin_api/apikeys/<int:pk>")
+def admin_delete_apikey(pk):
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    row = ApiKey.query.get(pk)
+    if not row:
+        return jsonify(ok=False, msg="Not found"), 404
+    db.session.delete(row); db.session.commit()
     return jsonify(ok=True)
 
-@app.route("/admin_api/apikeys/<int:row_id>", methods=["DELETE"])
-@require_admin_auth
-def admin_apikey_delete(row_id):
-    row = ApiKey.query.get_or_404(row_id)
-    db.session.delete(row)
-    db.session.commit()
-    db.session.add(ActivityLog(action="apikey.delete", details=f"id={row_id}", ip=request.remote_addr))
-    db.session.commit()
-    return jsonify(ok=True)
-
-# ---- Config ----
-@app.route("/admin_api/config", methods=["GET"])
-@require_admin_auth
+# ---- Config
+@app.get("/admin_api/config")
 def admin_get_config():
+    unauth = _require_admin()
+    if unauth:
+        return unauth
     cfg = Config.query.first()
+    if not cfg:
+        cfg = Config(
+            latest_version="2.3.3",
+            force_update=False,
+            maintenance=False,
+            maintenance_message="",
+            update_links="[]",
+            update_description="",
+            updated_at=datetime.now(timezone.utc),
+        )
+        db.session.add(cfg); db.session.commit()
     return jsonify(ok=True, config={
         "latest_version": cfg.latest_version,
         "force_update": bool(cfg.force_update),
         "maintenance": bool(cfg.maintenance),
         "maintenance_message": cfg.maintenance_message or "",
-        "update_description": cfg.update_description or "",
         "update_links": cfg.update_links or "[]",
+        "update_description": cfg.update_description or "",
         "updated_at": cfg.updated_at.isoformat() if cfg.updated_at else None
     })
 
-@app.route("/admin_api/config", methods=["POST"])
-@require_admin_auth
+@app.post("/admin_api/config")
 def admin_set_config():
-    data = request.get_json(force=True, silent=True) or {}
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    j = request.json or {}
     cfg = Config.query.first()
-    if "latest_version" in data:
-        cfg.latest_version = str(data.get("latest_version") or "").strip() or cfg.latest_version
-    if "force_update" in data:
-        cfg.force_update = bool(data.get("force_update"))
-    if "maintenance" in data:
-        cfg.maintenance = bool(data.get("maintenance"))
-    if "maintenance_message" in data:
-        cfg.maintenance_message = data.get("maintenance_message") or ""
-    if "update_description" in data:
-        cfg.update_description = data.get("update_description") or ""
-    if "update_links" in data:
-        # очікуємо JSON-рядок або масив; збережемо як текст
-        import json
-        links = data.get("update_links")
-        if isinstance(links, list):
-            cfg.update_links = json.dumps(links, ensure_ascii=False)
-        else:
-            cfg.update_links = str(links or "[]")
-    db.session.commit()
-    db.session.add(ActivityLog(action="config.update", details="", ip=request.remote_addr))
+    if not cfg:
+        cfg = Config()
+        db.session.add(cfg)
+    cfg.latest_version = str(j.get("latest_version", cfg.latest_version or "2.3.3"))
+    cfg.force_update = bool(j.get("force_update", cfg.force_update or False))
+    cfg.maintenance = bool(j.get("maintenance", cfg.maintenance or False))
+    cfg.maintenance_message = str(j.get("maintenance_message", cfg.maintenance_message or ""))
+    # приймаємо або JSON-рядок, або масив — зберігаємо як JSON-рядок
+    links = j.get("update_links", cfg.update_links or "[]")
+    if isinstance(links, list):
+        import json as _json
+        links = _json.dumps(links, ensure_ascii=False)
+    cfg.update_links = str(links)
+    cfg.update_description = str(j.get("update_description", cfg.update_description or ""))
+    cfg.updated_at = datetime.now(timezone.utc)
     db.session.commit()
     return jsonify(ok=True)
 
-# ---- Prices ----
-@app.route("/admin_api/prices", methods=["GET"])
-@require_admin_auth
-def admin_prices_list():
-    rows = Price.query.order_by(Price.model.asc()).all()
-    return jsonify(ok=True, prices=[{"id": r.id, "model": r.model, "price": r.price,
-                                     "updated_at": r.updated_at.isoformat() if r.updated_at else None}
-                                    for r in rows])
+# ---- Prices
+@app.get("/admin_api/prices")
+def admin_get_prices():
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    items = Price.query.order_by(Price.id.asc()).all()
+    out = [{"id": p.id, "model": p.model, "price": p.price,
+            "updated_at": p.updated_at.isoformat() if p.updated_at else None} for p in items]
+    return jsonify(ok=True, items=out)
 
-@app.route("/admin_api/prices", methods=["POST"])
-@require_admin_auth
-def admin_prices_upsert_bulk():
-    """
-    Очікує: { prices: [{model, price}, ...] }
-    """
-    data = request.get_json(force=True, silent=True) or {}
-    items = data.get("prices") or []
-    if not isinstance(items, list) or not items:
-        return jsonify(ok=False, msg="No items"), 400
-    touched = 0
-    for it in items:
-        model = str(it.get("model") or "").strip()
-        try:
-            price_val = int(it.get("price"))
-        except Exception:
-            continue
-        if not model or price_val <= 0:
-            continue
-        row = Price.query.filter_by(model=model).first()
-        if row:
-            row.price = price_val
-        else:
-            row = Price(model=model, price=price_val)
-            db.session.add(row)
-        touched += 1
+@app.post("/admin_api/prices")
+def admin_set_price():
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    j = request.json or {}
+    model_id = str(j.get("model", "")).strip()
+    price_val = int(j.get("price", 0))
+    if not model_id or price_val <= 0:
+        return jsonify(ok=False, msg="Invalid model/price"), 400
+    row = Price.query.filter_by(model=model_id).first()
+    if row:
+        row.price = price_val
+        row.updated_at = datetime.now(timezone.utc)
+    else:
+        row = Price(model=model_id, price=price_val, updated_at=datetime.now(timezone.utc))
+        db.session.add(row)
     db.session.commit()
-    db.session.add(ActivityLog(action="price.bulk_upsert", details=f"count={touched}", ip=request.remote_addr))
-    db.session.commit()
-    return jsonify(ok=True, touched=touched)
+    return jsonify(ok=True, id=row.id)
 
-@app.route("/admin_api/prices/<int:row_id>", methods=["PATCH"])
-@require_admin_auth
-def admin_price_update_one(row_id):
-    data = request.get_json(force=True, silent=True) or {}
-    row = Price.query.get_or_404(row_id)
-    if "price" in data:
-        try:
-            val = int(data.get("price"))
-            if val > 0:
-                row.price = val
-        except Exception:
-            pass
+# ---- Logs (read-only)
+@app.get("/admin_api/logs")
+def admin_get_logs():
+    unauth = _require_admin()
+    if unauth:
+        return unauth
+    limit = int(request.args.get("limit", 200))
+    qs = ActivityLog.query.order_by(ActivityLog.id.desc()).limit(limit).all()
+    out = []
+    for x in qs:
+        out.append({
+            "id": x.id,
+            "action": x.action,
+            "details": x.details,
+            "created_at": x.created_at.isoformat() if x.created_at else None
+        })
+    return jsonify(ok=True, items=out)
+
+# ======== CLIENT-FACING API (для десктопу) ========
+def _get_prices_map():
+    rows = Price.query.all()
+    if not rows:
+        # fallback у разі пустої таблиці
+        return {
+            "seedream-v4": 1,
+            "flux-dev": 1,
+            "flux-pro-v1-1": 2,
+            "gemini-2.5-flash": 1,
+            "imagen3": 2,
+            "classic-fast": 1,
+        }
+    return {r.model: int(r.price) for r in rows}
+
+@app.post("/license/check")
+def license_check():
+    j = request.json or {}
+    key = str(j.get("key", "")).strip()
+    mac = str(j.get("mac", "")).strip().upper()
+    if not key or not mac:
+        return jsonify(ok=False, msg="Missing key or mac"), 400
+    row = License.query.filter_by(key=key).first()
+    if not row:
+        return jsonify(ok=False, msg="Key not found")
+    if (row.status or "").lower() != "active":
+        return jsonify(ok=False, msg="Inactive key", status=row.status or "unknown")
+    if not row.mac_id:
+        row.mac_id = mac
+    elif row.mac_id.upper().strip() != mac:
+        return jsonify(ok=False, msg="Already used on another device", status="active")
+    row.last_active = datetime.now(timezone.utc)
     db.session.commit()
-    db.session.add(ActivityLog(action="price.update", details=f"id={row_id}", ip=request.remote_addr))
+    return jsonify(ok=True, credit=int(row.credit), status="active")
+
+@app.post("/license/debit")
+def license_debit():
+    j = request.json or {}
+    key = str(j.get("key", "")).strip()
+    mac = str(j.get("mac", "")).strip().upper()
+    model = str(j.get("model", "")).strip()
+    count = int(j.get("count", 0))
+    if not key or not mac or not model or count <= 0:
+        return jsonify(ok=False, msg="Invalid payload"), 400
+
+    row = License.query.filter_by(key=key).first()
+    if not row:
+        return jsonify(ok=False, msg="Key not found")
+    if (row.status or "").lower() != "active":
+        return jsonify(ok=False, msg="Inactive key", status=row.status or "unknown")
+    if not row.mac_id:
+        row.mac_id = mac
+    elif row.mac_id.upper().strip() != mac:
+        return jsonify(ok=False, msg="Key bound to another device", status="active")
+
+    prices = _get_prices_map()
+    unit = int(prices.get(model, 1))
+    total_cost = unit * count
+    if int(row.credit) < total_cost:
+        return jsonify(ok=False, msg="Insufficient credit", credit=int(row.credit))
+    row.credit = int(row.credit) - total_cost
+    row.last_active = datetime.now(timezone.utc)
+    db.session.commit()
+    return jsonify(ok=True, credit=int(row.credit), debited=total_cost, unitPrice=unit, model=model, count=count)
+
+@app.post("/next_api_key")
+def next_api_key():
+    # шукаємо перший active & not in_use
+    row = ApiKey.query.filter_by(status="active", in_use=False).order_by(ApiKey.id.asc()).first()
+    if not row:
+        return jsonify(ok=False, msg="No ACTIVE free API keys")
+    row.in_use = True
+    row.last_used = datetime.now(timezone.utc)
+    db.session.commit()
+    return jsonify(ok=True, api_key=row.api_key)
+
+@app.post("/release_api_key")
+def release_api_key():
+    j = request.json or {}
+    api_key = str(j.get("api_key", "")).strip()
+    if not api_key:
+        return jsonify(ok=False, msg="Missing api_key"), 400
+    row = ApiKey.query.filter_by(api_key=api_key).first()
+    if not row:
+        return jsonify(ok=False, msg="API key not found")
+    row.in_use = False
+    row.last_used = datetime.now(timezone.utc)
+    db.session.commit()
+    return jsonify(ok=True, status=row.status, changed=True)
+
+@app.post("/deactivate_api_key")
+def deactivate_api_key():
+    j = request.json or {}
+    api_key = str(j.get("api_key", "")).strip()
+    if not api_key:
+        return jsonify(ok=False, msg="Missing api_key"), 400
+    row = ApiKey.query.filter_by(api_key=api_key).first()
+    if not row:
+        return jsonify(ok=False, msg="API key not found")
+    row.status = "inactive"
+    row.in_use = False
+    row.last_used = datetime.now(timezone.utc)
     db.session.commit()
     return jsonify(ok=True)
 
-# ---- Logs ----
-@app.route("/admin_api/logs", methods=["GET"])
-@require_admin_auth
-def admin_logs_list():
-    lim = max(1, min(int(request.args.get("limit", 200)), 1000))
-    rows = ActivityLog.query.order_by(ActivityLog.id.desc()).limit(lim).all()
-    return jsonify(items=[{
-        "id": r.id,
-        "action": r.action,
-        "details": r.details,
-        "ip": r.ip,
-        "created_at": r.created_at.isoformat() if r.created_at else None
-    } for r in rows])
+@app.post("/get_config")
+def get_config():
+    cfg = Config.query.first()
+    if not cfg:
+        cfg = Config(
+            latest_version="2.3.3",
+            force_update=False,
+            maintenance=False,
+            maintenance_message="",
+            update_links="[]",
+            update_description="",
+            updated_at=datetime.now(timezone.utc),
+        )
+        db.session.add(cfg); db.session.commit()
+    return jsonify(ok=True, config={
+        "latest_version": cfg.latest_version,
+        "force_update": bool(cfg.force_update),
+        "maintenance": bool(cfg.maintenance),
+        "maintenance_message": cfg.maintenance_message or "",
+        "update_links": cfg.update_links or "[]",
+        "update_description": cfg.update_description or "",
+    })
 
-# =========================
-# Error handling
-# =========================
-@app.errorhandler(404)
-def _404(_e):
-    return jsonify(ok=False, error="Not Found"), 404
+@app.post("/get_prices")
+def get_prices():
+    return jsonify(ok=True, prices=_get_prices_map())
 
-@app.errorhandler(500)
-def _500(e):
-    return jsonify(ok=False, error="Internal Server Error", detail=str(e)), 500
-
-# =========================
-# App bootstrap
-# =========================
-with app.app_context():
-    _ensure_base_schema()
-
-# =========================
-# Dev server
-# =========================
+# ======== gunicorn entry ========
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
