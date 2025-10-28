@@ -1,495 +1,617 @@
-# -*- coding: utf-8 -*-
-import os, json
+import os, re, json, base64, secrets
 from datetime import datetime
-from io import BytesIO
-from flask import Flask, request, jsonify, send_from_directory, send_file
-from flask_sqlalchemy import SQLAlchemy
+from functools import wraps
+
+from flask import (
+    Flask, request, jsonify, send_from_directory, make_response
+)
 from flask_cors import CORS
-from dotenv import load_dotenv
-from sqlalchemy import inspect
+from sqlalchemy import text, inspect, or_
+from sqlalchemy.exc import IntegrityError
 
-# ==========================================================
-# 🧿 Amulet | Seedream Backend v3.8 — FULL Admin API + Auto-Fix
-# ==========================================================
+from models import db, License, ApiKey, Config, Price, ActivityLog, utcnow
 
-load_dotenv()
-app = Flask(__name__, static_folder='static')
-CORS(app)
+# ---------- App / DB ----------
+app = Flask(__name__, static_folder=None)
+CORS(app, resources={r"/admin_api/*": {"origins": "*"}})
 
-# ---- ENV / CONFIG ----
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///amulet.db')
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'amulet-secret')
-db = SQLAlchemy(app)
+app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev_secret_change_me")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if not DATABASE_URL:
+    # SQLite за замовчуванням у файлі amulet.db в корені
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///amulet.db"
+else:
+    app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-ADMIN_USER = os.getenv('ADMIN_USER', 'admin')
-ADMIN_PASS = os.getenv('ADMIN_PASS', 'admin123')
+db.init_app(app)
 
-# ==========================================================
-# MODELS
-# ==========================================================
-class License(db.Model):
-    __tablename__ = 'license'
-    id = db.Column(db.Integer, primary_key=True)
-    key = db.Column(db.String(255), unique=True, nullable=False)
-    mac_id = db.Column(db.String(255))
-    status = db.Column(db.String(50), default="active")  # active|inactive|banned (використання на фронті — як active)
-    credit = db.Column(db.Integer, default=0)
-    active = db.Column(db.Boolean, default=True)
-    last_active = db.Column(db.DateTime)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, onupdate=datetime.utcnow)
+DEFAULT_PRICES = {
+    "seedream-v4": 1,
+    "flux-dev": 1,
+    "flux-pro-v1-1": 2,
+    "gemini-2.5-flash": 1,
+    "imagen3": 2,
+    "classic-fast": 1,
+}
 
-class ApiKey(db.Model):
-    __tablename__ = 'api_key'
-    id = db.Column(db.Integer, primary_key=True)
-    api_key = db.Column(db.String(255), unique=True, nullable=False)
-    status = db.Column(db.String(50), default='active')
-    in_use = db.Column(db.Boolean, default=False)
-    last_used = db.Column(db.DateTime)
-    note = db.Column(db.Text)
+# ---------- Auth ----------
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")  # альтернативний токен (заголовок X-Admin-Token або ?token=)
 
-class Voice(db.Model):
-    __tablename__ = 'voice'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(255), nullable=False)
-    voice_id = db.Column(db.String(255), unique=True, nullable=False)
-    active = db.Column(db.Boolean, default=True)
+def _basic_auth_ok():
+    # токен
+    tok = request.headers.get("X-Admin-Token") or request.args.get("token")
+    if ADMIN_TOKEN and tok and secrets.compare_digest(tok, ADMIN_TOKEN):
+        return True
 
-class Config(db.Model):
-    __tablename__ = 'config'
-    id = db.Column(db.Integer, primary_key=True)
-    latest_version = db.Column(db.String(50), default='1.0.0')
-    force_update = db.Column(db.Boolean, default=False)
-    maintenance = db.Column(db.Boolean, default=False)
-    maintenance_message = db.Column(db.Text, default='')
-    update_description = db.Column(db.Text, default='')
-    update_links = db.Column(db.Text, default='[]')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class ActivityLog(db.Model):
-    __tablename__ = 'activity_log'
-    id = db.Column(db.Integer, primary_key=True)
-    license_id = db.Column(db.Integer)
-    action = db.Column(db.String(50))
-    char_count = db.Column(db.Integer, default=0)
-    details = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-# ==========================================================
-# AUTO SCHEMA FIX
-# ==========================================================
-def _ensure_columns():
-    engine = db.engine
-    insp = inspect(engine)
-
-    def ensure(table, col, ddl):
-        try:
-            cols = {c["name"] for c in insp.get_columns(table)}
-            if col not in cols:
-                with engine.begin() as conn:
-                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
-                print(f"🛠 Added column: {table}.{col}")
-        except Exception as e:
-            print(f"⚠️ Skip ensure {table}.{col}: {e}")
-
-    # License
-    ensure("license", "status", "VARCHAR(50) DEFAULT 'active'")
-    ensure("license", "active", "BOOLEAN DEFAULT 1")
-    ensure("license", "last_active", "DATETIME")
-
-    # ApiKey
-    ensure("api_key", "in_use", "BOOLEAN DEFAULT 0")
-    ensure("api_key", "note", "TEXT")
-    ensure("api_key", "last_used", "DATETIME")
-
-    # Voice (in case of old DBs)
-    try:
-        insp.get_columns("voice")
-    except Exception:
-        with engine.begin() as conn:
-            conn.exec_driver_sql("""
-            CREATE TABLE IF NOT EXISTS voice (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              name VARCHAR(255) NOT NULL,
-              voice_id VARCHAR(255) UNIQUE NOT NULL,
-              active BOOLEAN DEFAULT 1
-            )
-            """)
-
-    # Config
-    ensure("config", "updated_at", "DATETIME DEFAULT CURRENT_TIMESTAMP")
-
-with app.app_context():
-    db.create_all()
-    _ensure_columns()
-    if not Config.query.first():
-        db.session.add(Config(update_description="Initial config"))
-        db.session.commit()
-
-# ==========================================================
-# BASIC AUTH
-# ==========================================================
-def _is_authed():
-    """Accepts Basic Auth or X-Admin-User/Pass headers (for fetch)."""
+    # Basic
     auth = request.authorization
-    if auth and auth.username == ADMIN_USER and auth.password == ADMIN_PASS:
-        return True
-    u = request.headers.get("X-Admin-User")
-    p = request.headers.get("X-Admin-Pass")
-    if u == ADMIN_USER and p == ADMIN_PASS:
-        return True
-    return False
+    if not auth:
+        return False
+    return secrets.compare_digest(auth.username or "", ADMIN_USER) and \
+           secrets.compare_digest(auth.password or "", ADMIN_PASS)
 
-def _need_auth():
-    return jsonify({"ok": False, "msg": "Unauthorized"}), 401
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if _basic_auth_ok():
+            return fn(*args, **kwargs)
+        resp = make_response("Auth required", 401)
+        resp.headers["WWW-Authenticate"] = 'Basic realm="Amulet Admin"'
+        return resp
+    return wrapper
 
-# ==========================================================
-# PUBLIC API (client)
-# ==========================================================
-@app.route("/api", methods=["POST"])
-def api_main():
-    req = request.get_json(force=True, silent=True) or {}
-    act = (req.get("action") or "").lower()
+# ---------- Helpers ----------
+def fmt_dt(dt):
+    if not dt: return ""
+    if isinstance(dt, str): return dt
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    def jerr(msg, code=400): return jsonify({"ok": False, "msg": msg}), code
-
+def log_event(event, meta=None):
     try:
-        if act == "check":
-            key = (req.get("key") or "").strip()
-            mac = (req.get("mac") or "").strip()
-            if not key or not mac: return jerr("key/mac required")
-            lic = License.query.filter_by(key=key).first()
-            if not lic: return jerr("License not found", 404)
-            if lic.status != "active": return jerr("Inactive license", 403)
-            if lic.mac_id and lic.mac_id != mac: return jerr("License bound to another device", 403)
-            if not lic.mac_id: lic.mac_id = mac
-            lic.last_active = datetime.utcnow()
-            db.session.commit()
-            return jsonify({"ok": True, "credit": lic.credit, "status": lic.status})
-
-        elif act == "debit":
-            key = (req.get("key") or "").strip()
-            mac = (req.get("mac") or "").strip()
-            model = (req.get("model") or "").strip()
-            count = int(req.get("count") or 0)
-            if not key or not mac or not model or count <= 0: return jerr("Invalid params")
-            lic = License.query.filter_by(key=key).first()
-            if not lic: return jerr("License not found", 404)
-            if lic.mac_id != mac: return jerr("MAC mismatch", 403)
-            if lic.credit < count: return jsonify({"ok": False, "msg": "Insufficient credit", "credit": lic.credit}), 402
-            lic.credit -= count
-            lic.last_active = datetime.utcnow()
-            db.session.add(ActivityLog(license_id=lic.id, action="debit", char_count=count, details=f"model={model}"))
-            db.session.commit()
-            return jsonify({"ok": True, "debited": count, "credit": lic.credit})
-
-        elif act == "refund":
-            key = (req.get("key") or "").strip()
-            mac = (req.get("mac") or "").strip()
-            count = int(req.get("count") or 0)
-            reason = (req.get("reason") or "").strip()
-            lic = License.query.filter_by(key=key).first()
-            if not lic: return jerr("License not found", 404)
-            if lic.mac_id != mac: return jerr("MAC mismatch", 403)
-            lic.credit += count
-            db.session.add(ActivityLog(license_id=lic.id, action="refund", char_count=count, details=reason))
-            db.session.commit()
-            return jsonify({"ok": True, "refunded": count, "credit": lic.credit})
-
-        elif act == "next_api_key":
-            k = ApiKey.query.filter_by(status="active", in_use=False).first()
-            if not k: return jerr("No active free API keys", 404)
-            k.in_use = True; k.last_used = datetime.utcnow(); db.session.commit()
-            return jsonify({"ok": True, "api_key": k.api_key})
-
-        elif act == "release_api_key":
-            x = (req.get("api_key") or "").strip()
-            k = ApiKey.query.filter_by(api_key=x).first()
-            if not k: return jerr("API key not found", 404)
-            k.in_use = False; k.last_used = datetime.utcnow(); db.session.commit()
-            return jsonify({"ok": True, "status": "released"})
-
-        elif act == "deactivate_api_key":
-            x = (req.get("api_key") or "").strip()
-            k = ApiKey.query.filter_by(api_key=x).first()
-            if not k: return jerr("API key not found", 404)
-            k.status = "inactive"; k.in_use = False; db.session.commit()
-            return jsonify({"ok": True, "status": "inactive"})
-
-        elif act == "get_config":
-            c = Config.query.first()
-            return jsonify({"ok": True, "config": {
-                "latest_version": c.latest_version,
-                "force_update": c.force_update,
-                "maintenance": c.maintenance,
-                "maintenance_message": c.maintenance_message,
-                "update_description": c.update_description,
-                "update_links": json.loads(c.update_links or "[]")
-            }})
-
-        elif act == "get_prices":
-            # базова відповідь; за потреби зробимо таблицю "prices"
-            return jsonify({"ok": True, "prices": {
-                "seedream-v4": 1, "flux-pro-v1-1": 2, "imagen3": 2, "classic-fast": 1, "_default": 1
-            }})
-        else:
-            return jerr("Unknown action")
-    except Exception as e:
-        return jsonify({"ok": False, "msg": f"Internal error: {e}"}), 500
-
-# ==========================================================
-# ADMIN API (фронтенд)
-# ==========================================================
-@app.route("/admin_api/login", methods=["GET", "POST"])
-def admin_login():
-    # Дозволяємо як JSON POST, так і GET з Basic/X-Admin header — щоб не було 404/405
-    if request.method == "POST":
-        data = request.get_json(force=True, silent=True) or {}
-        if data.get("username") == ADMIN_USER and data.get("password") == ADMIN_PASS:
-            return jsonify({"ok": True})
-        return jsonify({"ok": False, "msg": "Invalid credentials"}), 401
-    # GET — просто перевірка заголовків
-    if _is_authed():
-        return jsonify({"ok": True})
-    return _need_auth()
-
-# ---- LICENSES ----
-@app.route("/admin_api/licenses", methods=["GET", "POST"])
-def admin_licenses():
-    if not _is_authed(): return _need_auth()
-
-    if request.method == "GET":
-        q = (request.args.get("q") or "").strip()
-        query = License.query
-        if q:
-            like = f"%{q}%"
-            query = query.filter(License.key.ilike(like) | License.mac_id.ilike(like))
-        items = query.order_by(License.id.desc()).all()
-        return jsonify([{
-            "id": l.id, "key": l.key, "status": l.status, "credit": l.credit, "active": l.active,
-            "mac_id": l.mac_id, "last_active": l.last_active.isoformat() if l.last_active else "",
-            "created_at": l.created_at.isoformat() if l.created_at else ""
-        } for l in items])
-
-    data = request.get_json(force=True)
-    key = (data.get("key") or "").strip()
-    if not key: return jsonify({"ok": False, "msg": "Key is required"}), 400
-    lic = License.query.filter_by(key=key).first()
-    if not lic:
-        lic = License(key=key)
-        db.session.add(lic)
-    lic.mac_id = data.get("mac_id") or lic.mac_id
-    if "credit" in data: lic.credit = int(data.get("credit") or 0)
-    if "status" in data: lic.status = data.get("status") or "active"
-    if "active" in data: lic.active = bool(data.get("active"))
-    db.session.commit()
-    return jsonify({"ok": True, "msg": "License saved"})
-
-@app.route("/admin_api/licenses/<int:lid>", methods=["PUT", "DELETE"])
-def admin_license_edit(lid):
-    if not _is_authed(): return _need_auth()
-    lic = License.query.get(lid)
-    if not lic: return jsonify({"ok": False, "msg": "Not found"}), 404
-    if request.method == "DELETE":
-        db.session.delete(lic); db.session.commit()
-        return jsonify({"ok": True, "msg": "Deleted"})
-    data = request.get_json(force=True)
-    for k in ["key", "mac_id", "status"]:
-        if k in data and data[k] is not None:
-            setattr(lic, k, data[k])
-    if "credit" in data: lic.credit = int(data.get("credit") or 0)
-    if "active" in data: lic.active = bool(data.get("active"))
-    db.session.commit()
-    return jsonify({"ok": True, "msg": "Updated"})
-
-@app.route("/admin_api/licenses/filter")
-def admin_filter_licenses():
-    if not _is_authed(): return _need_auth()
-    min_credit = request.args.get("min_credit", type=int)
-    max_credit = request.args.get("max_credit", type=int)
-    active = request.args.get("active")  # "true"|"false"|None
-    q = License.query
-    if min_credit is not None: q = q.filter(License.credit >= min_credit)
-    if max_credit is not None: q = q.filter(License.credit <= max_credit)
-    if active in ("true", "false"): q = q.filter(License.active == (active == "true"))
-    res = q.order_by(License.id.desc()).all()
-    return jsonify([{
-        "id": l.id, "key": l.key, "credit": l.credit, "active": l.active, "mac_id": l.mac_id
-    } for l in res])
-
-# ---- API KEYS ----
-@app.route("/admin_api/apikeys", methods=["GET", "POST"])
-def admin_apikeys():
-    if not _is_authed(): return _need_auth()
-
-    if request.method == "GET":
-        keys = ApiKey.query.order_by(ApiKey.id.desc()).all()
-        return jsonify([{
-            "id": k.id, "api_key": k.api_key, "status": k.status,
-            "in_use": k.in_use, "last_used": k.last_used.isoformat() if k.last_used else "",
-            "note": k.note or ""
-        } for k in keys])
-
-    # POST: JSON або multipart (.txt — кожен ключ з нового рядка)
-    if request.content_type and "multipart/form-data" in request.content_type:
-        file = request.files.get("file")
-        if not file: return jsonify({"ok": False, "msg": "No file"}), 400
-        lines = file.read().decode("utf-8", errors="ignore").splitlines()
-        cnt = 0
-        for line in lines:
-            s = line.strip()
-            if not s: continue
-            if not ApiKey.query.filter_by(api_key=s).first():
-                db.session.add(ApiKey(api_key=s))
-                cnt += 1
+        db.session.add(ActivityLog(event=event, meta=json.dumps(meta or {}, ensure_ascii=False)))
         db.session.commit()
-        return jsonify({"ok": True, "imported": cnt})
+    except Exception:
+        db.session.rollback()
 
-    data = request.get_json(force=True)
-    s = (data.get("api_key") or "").strip()
-    if not s: return jsonify({"ok": False, "msg": "api_key required"}), 400
-    if not ApiKey.query.filter_by(api_key=s).first():
-        db.session.add(ApiKey(api_key=s))
-        db.session.commit()
-    return jsonify({"ok": True, "msg": "Saved"})
+def paginate(query, page, page_size):
+    total = query.count()
+    pages = max(1, (total + page_size - 1) // page_size)
+    items = query.offset((page-1)*page_size).limit(page_size).all()
+    return total, pages, items
 
-@app.route("/admin_api/apikeys/<int:kid>", methods=["PUT", "DELETE"])
-def admin_apikeys_edit(kid):
-    if not _is_authed(): return _need_auth()
-    k = ApiKey.query.get(kid)
-    if not k: return jsonify({"ok": False, "msg": "Not found"}), 404
-    if request.method == "DELETE":
-        db.session.delete(k); db.session.commit()
-        return jsonify({"ok": True, "msg": "Deleted"})
-    data = request.get_json(force=True)
-    if "api_key" in data and data["api_key"]:
-        k.api_key = data["api_key"]
-    if "status" in data and data["status"]:
-        k.status = data["status"]
-    if "in_use" in data:
-        k.in_use = bool(data["in_use"])
-    if "note" in data:
-        k.note = data["note"]
-    db.session.commit()
-    return jsonify({"ok": True, "msg": "Updated"})
+def ensure_schema():
+    """Створює таблиці та додає відсутні колонки (для старих SQLite)."""
+    with app.app_context():
+        db.create_all()
 
-# ---- VOICES ----
-@app.route("/admin_api/voices", methods=["GET", "POST", "PUT"])
-def admin_voices():
-    if not _is_authed(): return _need_auth()
-    if request.method == "GET":
-        vs = Voice.query.order_by(Voice.id.desc()).all()
-        return jsonify([{"id": v.id, "name": v.name, "voice_id": v.voice_id, "active": v.active} for v in vs])
-    if request.method == "POST":
-        d = request.get_json(force=True)
-        name = (d.get("name") or "").strip()
-        vid = (d.get("voice_id") or "").strip()
-        if not name or not vid: return jsonify({"ok": False, "msg": "name/voice_id required"}), 400
-        if not Voice.query.filter_by(voice_id=vid).first():
-            db.session.add(Voice(name=name, voice_id=vid, active=bool(d.get("active", True))))
+        insp = inspect(db.engine)
+
+        def add_col_if_missing(table, coldef_sql):
+            # SQLite/PG: проста перевірка — якщо колонки нема, додаємо
+            cols = {c["name"] for c in insp.get_columns(table)}
+            name = coldef_sql.split()[0].strip('"').strip()
+            if name not in cols:
+                with db.engine.begin() as conn:
+                    conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {coldef_sql}'))
+
+        # license
+        if insp.has_table("license"):
+            add_col_if_missing("license", '"mac_id" VARCHAR(64)')
+            add_col_if_missing("license", '"status" VARCHAR(32) DEFAULT \'active\'')
+            add_col_if_missing("license", '"credit" INTEGER DEFAULT 0')
+            add_col_if_missing("license", '"last_active" TIMESTAMP')
+
+        # apikey
+        if insp.has_table("apikey"):
+            add_col_if_missing("apikey", '"status" VARCHAR(16) DEFAULT \'active\'')
+            # boolean як INTEGER для sqlite сумісності
+            add_col_if_missing("apikey", '"in_use" BOOLEAN DEFAULT 0')
+            add_col_if_missing("apikey", '"last_used" TIMESTAMP')
+            add_col_if_missing("apikey", '"note" VARCHAR(255)')
+
+        # config
+        if insp.has_table("config"):
+            add_col_if_missing("config", '"latest_version" VARCHAR(32) DEFAULT \'2.3.3\'')
+            add_col_if_missing("config", '"force_update" BOOLEAN DEFAULT 0')
+            add_col_if_missing("config", '"maintenance" BOOLEAN DEFAULT 0')
+            add_col_if_missing("config", '"maintenance_message" VARCHAR(500) DEFAULT \'\'')
+            add_col_if_missing("config", '"update_description" TEXT DEFAULT \'\'')
+            add_col_if_missing("config", '"update_links" TEXT DEFAULT \'[]\'')
+            add_col_if_missing("config", '"updated_at" TIMESTAMP')
+
+        # price
+        if insp.has_table("price"):
+            add_col_if_missing("price", '"model" VARCHAR(80)')
+            add_col_if_missing("price", '"price" INTEGER')
+
+        # ініціалізація config
+        if db.session.query(Config).count() == 0:
+            cfg = Config(
+                latest_version="2.3.3",
+                force_update=False,
+                maintenance=False,
+                maintenance_message="",
+                update_description="",
+                update_links="[]",
+                updated_at=utcnow()
+            )
+            db.session.add(cfg)
             db.session.commit()
-        return jsonify({"ok": True, "msg": "Voice saved"})
-    if request.method == "PUT":
-        d = request.get_json(force=True)
-        v = Voice.query.get(int(d.get("id") or 0))
-        if not v: return jsonify({"ok": False, "msg": "Not found"}), 404
-        if "name" in d and d["name"]: v.name = d["name"]
-        if "voice_id" in d and d["voice_id"]: v.voice_id = d["voice_id"]
-        if "active" in d: v.active = bool(d["active"])
-        db.session.commit()
-        return jsonify({"ok": True, "msg": "Updated"})
 
-@app.route("/admin_api/voices/<int:vid>", methods=["DELETE"])
-def admin_delete_voice(vid):
-    if not _is_authed(): return _need_auth()
-    v = Voice.query.get(vid)
-    if not v: return jsonify({"ok": False, "msg": "Not found"}), 404
-    db.session.delete(v); db.session.commit()
-    return jsonify({"ok": True, "msg": "Deleted"})
+        # Якщо таблиця price порожня — заповнюємо дефолтами
+        if db.session.query(Price).count() == 0:
+            for m, p in DEFAULT_PRICES.items():
+                db.session.add(Price(model=m, price=p))
+            db.session.commit()
 
-@app.route("/admin_api/voices/delete_all", methods=["DELETE"])
-def admin_delete_all_voices():
-    if not _is_authed(): return _need_auth()
-    Voice.query.delete(); db.session.commit()
-    return jsonify({"ok": True, "msg": "All voices deleted"})
+ensure_schema()
 
-# ---- CONFIG ----
-@app.route("/admin_api/config", methods=["GET", "PUT"])
-def admin_config():
-    if not _is_authed(): return _need_auth()
-    c = Config.query.first()
-    if request.method == "GET":
-        return jsonify({
-            "latest_version": c.latest_version,
-            "force_update": c.force_update,
-            "maintenance": c.maintenance,
-            "maintenance_message": c.maintenance_message,
-            "update_description": c.update_description,
-            "update_links": json.loads(c.update_links or "[]")
-        })
-    d = request.get_json(force=True)
-    if "latest_version" in d: c.latest_version = d["latest_version"]
-    if "force_update" in d: c.force_update = bool(d["force_update"])
-    if "maintenance" in d: c.maintenance = bool(d["maintenance"])
-    if "maintenance_message" in d: c.maintenance_message = d["maintenance_message"]
-    if "update_description" in d: c.update_description = d["update_description"]
-    if "update_links" in d:
-        try: c.update_links = json.dumps(d["update_links"], ensure_ascii=False)
-        except: c.update_links = json.dumps([x.strip() for x in str(d["update_links"]).split(",") if x.strip()], ensure_ascii=False)
-    c.updated_at = datetime.utcnow()
-    db.session.commit()
-    return jsonify({"ok": True, "msg": "Config updated"})
-
-# ---- LOGS & BACKUP ----
-@app.route("/admin_api/logs")
-def admin_logs():
-    if not _is_authed(): return _need_auth()
-    items = ActivityLog.query.order_by(ActivityLog.created_at.desc()).limit(200).all()
-    return jsonify([{
-        "id": x.id, "license_id": x.license_id, "action": x.action, "char_count": x.char_count,
-        "details": x.details, "created_at": x.created_at.isoformat()
-    } for x in items])
-
-@app.route("/admin_api/backup")
-def admin_backup():
-    if not _is_authed(): return _need_auth()
-    data = {
-        "licenses": [{"key": x.key, "credit": x.credit, "status": x.status, "active": x.active} for x in License.query.all()],
-        "api_keys": [{"api_key": k.api_key, "status": k.status, "in_use": k.in_use, "note": k.note} for k in ApiKey.query.all()],
-        "voices":   [{"name": v.name, "voice_id": v.voice_id, "active": v.active} for v in Voice.query.all()],
-        "config":   [{
-            "latest_version": c.latest_version, "force_update": c.force_update, "maintenance": c.maintenance,
-            "maintenance_message": c.maintenance_message, "update_description": c.update_description,
-            "update_links": json.loads(c.update_links or "[]")
-        } for c in [Config.query.first()]]
-    }
-    buf = BytesIO(json.dumps(data, indent=2, ensure_ascii=False).encode())
-    return send_file(buf, mimetype="application/json", as_attachment=True, download_name="amulet_backup.json")
-
-@app.route("/admin_api/backup/users")
-def admin_backup_users():
-    if not _is_authed(): return _need_auth()
-    data = {"licenses": [
-        {"key": x.key, "mac_id": x.mac_id, "credit": x.credit, "active": x.active, "status": x.status}
-        for x in License.query.all()
-    ]}
-    buf = BytesIO(json.dumps(data, indent=2, ensure_ascii=False).encode())
-    return send_file(buf, mimetype="application/json", as_attachment=True, download_name="users_backup.json")
-
-# ==========================================================
-# STATIC
-# ==========================================================
+# ---------- Static (захищаємо, щоб спливла basic-auth) ----------
 @app.route("/")
-@app.route("/admin")
-def admin_page():
-    return send_from_directory('static', 'admin.html')
+@admin_required
+def root():
+    # віддай admin.html зі статичної папки "static" (поклади туди свої admin.html/admin.js/admin.css)
+    return send_from_directory("static", "admin.html")
 
-@app.route("/<path:p>")
-def static_files(p):
-    return send_from_directory('static', p)
+@app.route("/admin.css")
+@admin_required
+def css():
+    return send_from_directory("static", "admin.css")
 
-# ==========================================================
+@app.route("/admin.js")
+@admin_required
+def js():
+    return send_from_directory("static", "admin.js")
+
+# Health
+@app.get("/healthz")
+def health():
+    return jsonify(ok=True, time=fmt_dt(datetime.utcnow()))
+
+# ---------- Admin API ----------
+@app.get("/admin_api/login")
+@admin_required
+def admin_login_ping():
+    return jsonify(ok=True, user=ADMIN_USER)
+
+# ---- Licenses ----
+@app.get("/admin_api/licenses")
+@admin_required
+def admin_licenses():
+    page = int(request.args.get("page", 1))
+    page_size = min(100, int(request.args.get("page_size", 20)))
+    q = (request.args.get("q") or "").strip()
+    status = (request.args.get("status") or "").strip().lower()
+
+    query = License.query
+    if q:
+        qs = f"%{q}%"
+        query = query.filter(or_(License.key.ilike(qs),
+                                 License.mac_id.ilike(qs)))
+    if status:
+        query = query.filter(License.status == status)
+
+    query = query.order_by(License.id.desc())
+    total, pages, items = paginate(query, page, page_size)
+    data = []
+    for it in items:
+        data.append({
+            "id": it.id,
+            "key": it.key,
+            "mac_id": it.mac_id,
+            "status": it.status,
+            "credit": it.credit,
+            "last_active": fmt_dt(it.last_active),
+            "created_at": fmt_dt(it.created_at),
+            "updated_at": fmt_dt(it.updated_at),
+        })
+    return jsonify(ok=True, page=page, pages=pages, total=total, items=data)
+
+@app.post("/admin_api/licenses")
+@admin_required
+def admin_license_create():
+    body = request.get_json(force=True, silent=True) or {}
+    key = (body.get("key") or "").strip()
+    if not key:
+        # простий генератор ключа XXXX-XXXX-XXXX
+        import random, string
+        def chunk():
+            return "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        key = f"{chunk()}-{chunk()}-{chunk()}"
+
+    lic = License(
+        key=key,
+        mac_id=(body.get("mac_id") or "").strip() or None,
+        status=(body.get("status") or "active").strip(),
+        credit=int(body.get("credit") or 0)
+    )
+    db.session.add(lic)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify(ok=False, msg="Key already exists"), 400
+
+    log_event("license.create", {"id": lic.id, "key": lic.key})
+    return jsonify(ok=True, id=lic.id)
+
+@app.put("/admin_api/licenses/<int:lic_id>")
+@admin_required
+def admin_license_update(lic_id):
+    lic = License.query.get_or_404(lic_id)
+    body = request.get_json(force=True, silent=True) or {}
+    if "key" in body:
+        newkey = (body.get("key") or "").strip()
+        if newkey and newkey != lic.key:
+            lic.key = newkey
+    if "mac_id" in body:
+        lic.mac_id = (body.get("mac_id") or "").strip() or None
+    if "status" in body:
+        lic.status = (body.get("status") or "active").strip()
+    if "credit" in body:
+        lic.credit = int(body.get("credit") or lic.credit)
+    db.session.commit()
+    log_event("license.update", {"id": lic.id})
+    return jsonify(ok=True)
+
+@app.delete("/admin_api/licenses/<int:lic_id>")
+@admin_required
+def admin_license_delete(lic_id):
+    lic = License.query.get_or_404(lic_id)
+    db.session.delete(lic)
+    db.session.commit()
+    log_event("license.delete", {"id": lic_id})
+    return jsonify(ok=True)
+
+@app.post("/admin_api/licenses/bulk")
+@admin_required
+def admin_license_bulk():
+    """
+    Приймає:
+      - multipart/form-data з 'file' (txt: один ключ у рядку) і опц. 'status', 'credit'
+      - або JSON: {"keys": ["AAA-BBB-CCC", ...], "status":"active", "credit":10}
+    """
+    created, skipped = 0, 0
+    status = (request.form.get("status") or request.args.get("status") or "active").strip()
+    credit = int(request.form.get("credit") or request.args.get("credit") or 0)
+
+    keys = []
+    if "file" in request.files:
+        content = request.files["file"].read().decode("utf-8", errors="ignore")
+        for line in content.splitlines():
+            k = line.strip()
+            if k:
+                keys.append(k)
+    else:
+        body = request.get_json(force=True, silent=True) or {}
+        keys = [str(x).strip() for x in body.get("keys", []) if str(x).strip()]
+        credit = int(body.get("credit") or credit)
+        status = (body.get("status") or status).strip() or "active"
+
+    for k in keys:
+        if not k: continue
+        if db.session.query(License.id).filter_by(key=k).first():
+            skipped += 1
+            continue
+        db.session.add(License(key=k, status=status, credit=credit))
+        created += 1
+    db.session.commit()
+    log_event("license.bulk", {"created": created, "skipped": skipped})
+    return jsonify(ok=True, created=created, skipped=skipped)
+
+@app.post("/admin_api/licenses/<int:lic_id>/credit_adjust")
+@admin_required
+def admin_license_credit_adjust(lic_id):
+    body = request.get_json(force=True, silent=True) or {}
+    delta = int(body.get("delta") or 0)
+    lic = License.query.get_or_404(lic_id)
+    lic.credit = max(0, int(lic.credit) + delta)
+    db.session.commit()
+    log_event("license.credit_adjust", {"id": lic_id, "delta": delta})
+    return jsonify(ok=True, credit=lic.credit)
+
+# ---- API Keys ----
+@app.get("/admin_api/apikeys")
+@admin_required
+def admin_apikeys():
+    page = int(request.args.get("page", 1))
+    page_size = min(100, int(request.args.get("page_size", 20)))
+    q = (request.args.get("q") or "").strip()
+    status = (request.args.get("status") or "").strip().lower()
+
+    query = ApiKey.query
+    if q:
+        qs = f"%{q}%"
+        query = query.filter(or_(ApiKey.api_key.ilike(qs),
+                                 ApiKey.note.ilike(qs)))
+    if status:
+        query = query.filter(ApiKey.status == status)
+
+    query = query.order_by(ApiKey.id.desc())
+    total, pages, items = paginate(query, page, page_size)
+    data = []
+    for it in items:
+        data.append({
+            "id": it.id,
+            "api_key": it.api_key,
+            "status": it.status,
+            "in_use": bool(it.in_use),
+            "last_used": fmt_dt(it.last_used),
+            "note": it.note or "",
+            "created_at": fmt_dt(it.created_at),
+            "updated_at": fmt_dt(it.updated_at),
+        })
+    return jsonify(ok=True, page=page, pages=pages, total=total, items=data)
+
+@app.post("/admin_api/apikeys")
+@admin_required
+def admin_apikey_create():
+    body = request.get_json(force=True, silent=True) or {}
+    api_key = (body.get("api_key") or "").strip()
+    if not api_key:
+        return jsonify(ok=False, msg="api_key required"), 400
+    ak = ApiKey(api_key=api_key,
+                status=(body.get("status") or "active").strip(),
+                note=(body.get("note") or "").strip() or None)
+    db.session.add(ak)
+    try:
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify(ok=False, msg="api_key exists"), 400
+    log_event("apikey.create", {"id": ak.id})
+    return jsonify(ok=True, id=ak.id)
+
+@app.put("/admin_api/apikeys/<int:key_id>")
+@admin_required
+def admin_apikey_update(key_id):
+    ak = ApiKey.query.get_or_404(key_id)
+    body = request.get_json(force=True, silent=True) or {}
+    if "api_key" in body:
+        v = (body.get("api_key") or "").strip()
+        if v and v != ak.api_key:
+            ak.api_key = v
+    if "status" in body:
+        ak.status = (body.get("status") or "active").strip()
+    if "in_use" in body:
+        ak.in_use = bool(body.get("in_use"))
+    if "note" in body:
+        ak.note = (body.get("note") or "").strip() or None
+    db.session.commit()
+    log_event("apikey.update", {"id": key_id})
+    return jsonify(ok=True)
+
+@app.delete("/admin_api/apikeys/<int:key_id>")
+@admin_required
+def admin_apikey_delete(key_id):
+    ak = ApiKey.query.get_or_404(key_id)
+    db.session.delete(ak)
+    db.session.commit()
+    log_event("apikey.delete", {"id": key_id})
+    return jsonify(ok=True)
+
+@app.post("/admin_api/apikeys/bulk")
+@admin_required
+def admin_apikey_bulk():
+    """
+    TXT: кожен ключ у новому рядку.
+    Приймає multipart 'file' або JSON {"keys":[...], "status":"active"}
+    """
+    created, skipped = 0, 0
+    status = (request.form.get("status") or request.args.get("status") or "active").strip()
+    keys = []
+    if "file" in request.files:
+        content = request.files["file"].read().decode("utf-8", errors="ignore")
+        for line in content.splitlines():
+            v = line.strip()
+            if v: keys.append(v)
+    else:
+        body = request.get_json(force=True, silent=True) or {}
+        keys = [str(x).strip() for x in body.get("keys", []) if str(x).strip()]
+        status = (body.get("status") or status).strip() or "active"
+
+    for k in keys:
+        if db.session.query(ApiKey.id).filter_by(api_key=k).first():
+            skipped += 1
+            continue
+        db.session.add(ApiKey(api_key=k, status=status, in_use=False))
+        created += 1
+    db.session.commit()
+    log_event("apikey.bulk", {"created": created, "skipped": skipped})
+    return jsonify(ok=True, created=created, skipped=skipped)
+
+# ---- Prices (Models) ----
+@app.get("/admin_api/prices")
+@admin_required
+def admin_prices():
+    page = int(request.args.get("page", 1))
+    page_size = min(200, int(request.args.get("page_size", 50)))
+    q = (request.args.get("q") or "").strip()
+    query = Price.query
+    if q:
+        qs = f"%{q}%"
+        query = query.filter(Price.model.ilike(qs))
+    query = query.order_by(Price.model.asc())
+    total, pages, items = paginate(query, page, page_size)
+    data = [{"id": it.id, "model": it.model, "price": it.price,
+             "created_at": fmt_dt(it.created_at), "updated_at": fmt_dt(it.updated_at)} for it in items]
+    return jsonify(ok=True, page=page, pages=pages, total=total, items=data)
+
+@app.post("/admin_api/prices")
+@admin_required
+def admin_price_upsert():
+    body = request.get_json(force=True, silent=True) or {}
+    model = (body.get("model") or "").strip()
+    price = int(body.get("price") or 0)
+    if not model or price <= 0:
+        return jsonify(ok=False, msg="model and positive price required"), 400
+    p = Price.query.filter_by(model=model).first()
+    if p:
+        p.price = price
+    else:
+        p = Price(model=model, price=price)
+        db.session.add(p)
+    db.session.commit()
+    log_event("price.upsert", {"model": model, "price": price})
+    return jsonify(ok=True, id=p.id, model=p.model, price=p.price)
+
+@app.put("/admin_api/prices/<int:price_id>")
+@admin_required
+def admin_price_update(price_id):
+    p = Price.query.get_or_404(price_id)
+    body = request.get_json(force=True, silent=True) or {}
+    if "model" in body:
+        v = (body.get("model") or "").strip()
+        if v and v != p.model:
+            if db.session.query(Price.id).filter_by(model=v).first():
+                return jsonify(ok=False, msg="model exists"), 400
+            p.model = v
+    if "price" in body:
+        pv = int(body.get("price") or 0)
+        if pv > 0:
+            p.price = pv
+    db.session.commit()
+    log_event("price.update", {"id": p.id})
+    return jsonify(ok=True)
+
+@app.delete("/admin_api/prices/<int:price_id>")
+@admin_required
+def admin_price_delete(price_id):
+    p = Price.query.get_or_404(price_id)
+    db.session.delete(p)
+    db.session.commit()
+    log_event("price.delete", {"id": price_id})
+    return jsonify(ok=True)
+
+@app.post("/admin_api/prices/bulk")
+@admin_required
+def admin_price_bulk():
+    """
+    TXT: рядок формату model=price або model,price або 'model price'
+    """
+    created, updated, skipped = 0, 0, 0
+    pairs = []
+    if "file" in request.files:
+        content = request.files["file"].read().decode("utf-8", errors="ignore")
+        lines = content.splitlines()
+    else:
+        body = request.get_json(force=True, silent=True) or {}
+        raw = body.get("data") or ""
+        lines = str(raw).splitlines()
+
+    for ln in lines:
+        ln = ln.strip()
+        if not ln: continue
+        if "=" in ln:
+            m, p = ln.split("=", 1)
+        elif "," in ln:
+            m, p = ln.split(",", 1)
+        else:
+            parts = ln.split()
+            if len(parts) < 2:
+                skipped += 1; continue
+            m, p = parts[0], parts[1]
+        model = m.strip()
+        try:
+            price = int(str(p).strip())
+        except Exception:
+            skipped += 1; continue
+        if not model or price <= 0:
+            skipped += 1; continue
+        pairs.append((model, price))
+
+    for model, price in pairs:
+        obj = Price.query.filter_by(model=model).first()
+        if obj:
+            if obj.price != price:
+                obj.price = price
+                updated += 1
+        else:
+            db.session.add(Price(model=model, price=price))
+            created += 1
+    db.session.commit()
+    log_event("price.bulk", {"created": created, "updated": updated, "skipped": skipped})
+    return jsonify(ok=True, created=created, updated=updated, skipped=skipped)
+
+@app.post("/admin_api/prices/defaults")
+@admin_required
+def admin_price_defaults():
+    touched = 0
+    for m, p in DEFAULT_PRICES.items():
+        obj = Price.query.filter_by(model=m).first()
+        if obj:
+            continue
+        db.session.add(Price(model=m, price=p))
+        touched += 1
+    db.session.commit()
+    log_event("price.defaults", {"added": touched})
+    return jsonify(ok=True, added=touched)
+
+# ---- Config ----
+@app.get("/admin_api/config")
+@admin_required
+def admin_config_get():
+    cfg = Config.query.order_by(Config.id.asc()).first()
+    if not cfg:
+        cfg = Config()
+        db.session.add(cfg)
+        db.session.commit()
+    return jsonify(ok=True, config={
+        "latest_version": cfg.latest_version,
+        "force_update": bool(cfg.force_update),
+        "maintenance": bool(cfg.maintenance),
+        "maintenance_message": cfg.maintenance_message or "",
+        "update_description": cfg.update_description or "",
+        "update_links": cfg.update_links or "[]",
+        "updated_at": fmt_dt(cfg.updated_at or cfg.updated_at),
+    })
+
+@app.post("/admin_api/config")
+@admin_required
+def admin_config_set():
+    body = request.get_json(force=True, silent=True) or {}
+    cfg = Config.query.order_by(Config.id.asc()).first()
+    if not cfg:
+        cfg = Config()
+        db.session.add(cfg)
+
+    if "latest_version" in body:
+        cfg.latest_version = str(body.get("latest_version") or cfg.latest_version)
+    if "force_update" in body:
+        cfg.force_update = bool(body.get("force_update"))
+    if "maintenance" in body:
+        cfg.maintenance = bool(body.get("maintenance"))
+    if "maintenance_message" in body:
+        cfg.maintenance_message = str(body.get("maintenance_message") or "")
+    if "update_description" in body:
+        cfg.update_description = str(body.get("update_description") or "")
+    if "update_links" in body:
+        # збережемо як JSON-рядок
+        links = body.get("update_links")
+        if isinstance(links, list):
+            cfg.update_links = json.dumps(links, ensure_ascii=False)
+        else:
+            cfg.update_links = str(links or "[]")
+    cfg.updated_at = utcnow()
+    db.session.commit()
+    log_event("config.update", {})
+    return jsonify(ok=True)
+
+# ---- Activity ----
+@app.get("/admin_api/logs")
+@admin_required
+def admin_logs():
+    page = int(request.args.get("page", 1))
+    page_size = min(100, int(request.args.get("page_size", 20)))
+    query = ActivityLog.query.order_by(ActivityLog.id.desc())
+    total, pages, items = paginate(query, page, page_size)
+    data = [{"id": it.id, "when": fmt_dt(it.when), "event": it.event, "meta": it.meta or ""} for it in items]
+    return jsonify(ok=True, page=page, pages=pages, total=total, items=data)
+
+# ---------- Run ----------
 if __name__ == "__main__":
-    # Для перезапуску локально:
-    # rm amulet.db  (за потреби)
-    app.run(port=3030, debug=True)
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=True)
