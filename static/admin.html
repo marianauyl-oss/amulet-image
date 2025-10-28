@@ -1,278 +1,145 @@
 <!doctype html>
 <html lang="uk">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Amulet | Admin</title>
-  <link rel="stylesheet" href="/admin.css" />
+  <meta charset="utf-8"/>
+  <title>Amulet Admin</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link rel="stylesheet" href="/admin.css"/>
 </head>
 <body class="bg-body">
-<header class="topbar">
-  <div class="topbar__left">
-    <div class="brand">Amulet Admin</div>
-    <div class="chip" id="loginChip">—</div>
-    <div class="chip chip-blue" id="cfgChip">config: …</div>
-  </div>
-  <div class="topbar__right">
-    <button id="reloadAllBtn" class="btn btn-secondary">Оновити все</button>
-  </div>
-</header>
+  <div class="container">
+    <h1>Amulet Admin</h1>
+    <div class="capsules">
+      <span id="caps-auth" class="cap cap-ok">AUTH</span>
+      <span id="caps-info" class="cap cap-info">Ready</span>
+    </div>
 
-<main class="container">
-  <ul class="tabs" id="tabs">
-    <li data-tab="tab-licenses" class="active">Ліцензії</li>
-    <li data-tab="tab-apikeys">API-ключі</li>
-    <li data-tab="tab-prices">Ціни моделей</li>
-    <li data-tab="tab-config">Конфіг</li>
-    <li data-tab="tab-logs">Логи</li>
-  </ul>
+    <ul class="tabs" id="tabs">
+      <li data-tab="tab-licenses" class="active">Licenses</li>
+      <li data-tab="tab-apikeys">API Keys</li>
+      <li data-tab="tab-prices">Prices</li>
+      <li data-tab="tab-config">Config</li>
+      <li data-tab="tab-logs">Logs</li>
+    </ul>
 
-  <!-- Ліцензії -->
-  <section id="tab-licenses" class="tab active">
-    <div class="card">
-      <div class="card__header">
-        <div class="title">Ліцензії</div>
-        <div class="actions">
-          <button id="licNewBtn" class="btn btn-primary">+ Додати</button>
-          <label class="btn btn-soft">
-            Імпорт .txt
-            <input type="file" id="licBulkFile" accept=".txt" hidden />
-          </label>
-          <input type="number" id="licBulkCredit" class="input" placeholder="Кредит (опц.)" style="width:140px" />
-          <select id="licBulkStatus" class="input" style="width:140px">
-            <option value="active">active</option>
-            <option value="inactive">inactive</option>
-            <option value="banned">banned</option>
-          </select>
-          <button id="licBulkUploadBtn" class="btn">Завантажити</button>
-        </div>
+    <div id="tab-licenses" class="tab active">
+      <div class="row">
+        <input id="lic-q" class="input" placeholder="Search (key/mac/status)"/>
+        <input id="lic-min" class="input" placeholder="min credit"/>
+        <input id="lic-max" class="input" placeholder="max credit"/>
+        <button id="lic-refresh" class="btn">Refresh</button>
       </div>
-
-      <div class="toolbar">
-        <input id="licSearch" class="input" placeholder="Пошук по ключу / MAC…" />
-        <select id="licStatus" class="input">
-          <option value="">всі статуси</option>
+      <div class="row">
+        <input id="lic-key" class="input" placeholder="KEY-XXXX" />
+        <input id="lic-mac" class="input" placeholder="AA:BB:CC:DD:EE:FF (optional)" />
+        <input id="lic-credit" class="input" placeholder="credit" />
+        <select id="lic-status" class="input">
           <option value="active">active</option>
           <option value="inactive">inactive</option>
-          <option value="banned">banned</option>
+          <option value="blocked">blocked</option>
         </select>
-        <select id="licPageSize" class="input">
-          <option>10</option><option selected>20</option><option>50</option><option>100</option>
-        </select>
-        <button id="licRefresh" class="btn">Оновити</button>
+        <button id="lic-save" class="btn btn-primary">Save</button>
       </div>
-
-      <div class="table-wrap">
-        <table class="table" id="licTable">
-          <thead>
-          <tr>
-            <th>ID</th>
-            <th>Ключ</th>
-            <th>MAC</th>
-            <th>Статус</th>
-            <th>Кредит</th>
-            <th>Остання активність</th>
-            <th>Створено</th>
-            <th>Оновлено</th>
-            <th>Дії</th>
-          </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-
-      <div class="pager">
-        <button class="btn" id="licPrev">←</button>
-        <span id="licPageInfo">1/1</span>
-        <button class="btn" id="licNext">→</button>
-      </div>
+      <table id="lic-table" class="table">
+        <thead>
+          <tr><th>ID</th><th>Key</th><th>MAC</th><th>Status</th><th>Credit</th><th>Last Active</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
-  </section>
 
-  <!-- API keys -->
-  <section id="tab-apikeys" class="tab">
-    <div class="card">
-      <div class="card__header">
-        <div class="title">API-ключі</div>
-        <div class="actions">
-          <input id="apiNewValue" class="input" placeholder="Новий ключ…" style="width:260px" />
-          <input id="apiNewNote" class="input" placeholder="Примітка (опц.)" style="width:220px" />
-          <button id="apiNewBtn" class="btn btn-primary">+ Додати</button>
-          <label class="btn btn-soft">
-            Імпорт .txt
-            <input type="file" id="apiBulkFile" accept=".txt" hidden />
-          </label>
-          <button id="apiBulkUploadBtn" class="btn">Завантажити</button>
-        </div>
-      </div>
-
-      <div class="toolbar">
-        <input id="apiSearch" class="input" placeholder="Пошук по ключу / нотатці…" />
-        <select id="apiStatus" class="input">
-          <option value="">всі статуси</option>
+    <div id="tab-apikeys" class="tab">
+      <div class="row">
+        <input id="api-q" class="input" placeholder="Search (key/status/note)"/>
+        <select id="api-status-filter" class="input">
+          <option value="">any</option>
           <option value="active">active</option>
           <option value="inactive">inactive</option>
         </select>
-        <select id="apiPageSize" class="input">
-          <option>10</option><option selected>20</option><option>50</option><option>100</option>
+        <button id="api-refresh" class="btn">Refresh</button>
+      </div>
+
+      <div class="row">
+        <input id="api-key" class="input" placeholder="API KEY" />
+        <select id="api-status" class="input">
+          <option value="active">active</option>
+          <option value="inactive">inactive</option>
         </select>
-        <button id="apiRefresh" class="btn">Оновити</button>
+        <input id="api-note" class="input" placeholder="note (optional)" />
+        <button id="api-add" class="btn btn-primary">Add</button>
       </div>
 
-      <div class="table-wrap">
-        <table class="table" id="apiTable">
-          <thead>
-          <tr>
-            <th>ID</th>
-            <th>API-ключ</th>
-            <th>Статус</th>
-            <th>In use</th>
-            <th>Востаннє</th>
-            <th>Нотатка</th>
-            <th>Створено</th>
-            <th>Оновлено</th>
-            <th>Дії</th>
-          </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-
-      <div class="pager">
-        <button class="btn" id="apiPrev">←</button>
-        <span id="apiPageInfo">1/1</span>
-        <button class="btn" id="apiNext">→</button>
-      </div>
-    </div>
-  </section>
-
-  <!-- Prices -->
-  <section id="tab-prices" class="tab">
-    <div class="card">
-      <div class="card__header">
-        <div class="title">Ціни моделей</div>
-        <div class="actions">
-          <input id="priceModel" class="input" placeholder="model (напр. flux-dev)" style="width:220px" />
-          <input id="priceValue" type="number" min="1" class="input" placeholder="ціна (int)" style="width:160px" />
-          <button id="priceAddBtn" class="btn btn-primary">Зберегти</button>
-          <label class="btn btn-soft">
-            Імпорт .txt
-            <input type="file" id="priceBulkFile" accept=".txt" hidden />
-          </label>
-          <button id="priceBulkUploadBtn" class="btn">Завантажити</button>
-          <button id="priceDefaultsBtn" class="btn btn-secondary">Заповнити дефолтами</button>
-        </div>
-      </div>
-
-      <div class="toolbar">
-        <input id="priceSearch" class="input" placeholder="Пошук по model…" />
-        <select id="pricePageSize" class="input">
-          <option>10</option><option selected>20</option><option>50</option><option>100</option><option>200</option>
+      <div class="row">
+        <input id="api-bulk-text" class="input" placeholder="Paste many keys here (one per line)"/>
+        <select id="api-bulk-status" class="input">
+          <option value="active">active</option>
+          <option value="inactive">inactive</option>
         </select>
-        <button id="priceRefresh" class="btn">Оновити</button>
+        <input id="api-bulk-note" class="input" placeholder="note for all (optional)"/>
+        <button id="api-bulk-add" class="btn btn-warn">Bulk Add</button>
       </div>
 
-      <div class="table-wrap">
-        <table class="table" id="priceTable">
-          <thead>
-          <tr>
-            <th>ID</th>
-            <th>Model</th>
-            <th>Price</th>
-            <th>Створено</th>
-            <th>Оновлено</th>
-            <th>Дії</th>
-          </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+      <div class="row">
+        <input type="file" id="api-file" accept=".txt" />
+        <select id="api-file-status" class="input">
+          <option value="active">active</option>
+          <option value="inactive">inactive</option>
+        </select>
+        <input id="api-file-note" class="input" placeholder="note (optional)" />
+        <button id="api-file-upload" class="btn btn-warn">Upload .txt</button>
       </div>
 
-      <div class="pager">
-        <button class="btn" id="pricePrev">←</button>
-        <span id="pricePageInfo">1/1</span>
-        <button class="btn" id="priceNext">→</button>
+      <table id="api-table" class="table">
+        <thead>
+          <tr><th>ID</th><th>API Key</th><th>Status</th><th>In use</th><th>Last used</th><th>Note</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div id="tab-prices" class="tab">
+      <div class="row">
+        <button id="price-refresh" class="btn">Refresh</button>
+        <button id="price-save" class="btn btn-primary">Save All</button>
+      </div>
+      <table id="price-table" class="table">
+        <thead><tr><th>ID</th><th>Model</th><th>Price</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div id="tab-config" class="tab">
+      <div class="row">
+        <input id="cfg-version" class="input" placeholder="latest_version"/>
+        <label><input type="checkbox" id="cfg-force"/> force_update</label>
+        <label><input type="checkbox" id="cfg-maint"/> maintenance</label>
+      </div>
+      <div class="row">
+        <input id="cfg-message" class="input" placeholder="maintenance_message"/>
+      </div>
+      <div class="row">
+        <textarea id="cfg-links" class="input" placeholder='update_links (JSON array)'></textarea>
+      </div>
+      <div class="row">
+        <textarea id="cfg-desc" class="input" placeholder="update_description"></textarea>
+      </div>
+      <div class="row">
+        <button id="cfg-refresh" class="btn">Refresh</button>
+        <button id="cfg-save" class="btn btn-primary">Save</button>
       </div>
     </div>
-  </section>
 
-  <!-- Config -->
-  <section id="tab-config" class="tab">
-    <div class="card">
-      <div class="card__header">
-        <div class="title">Конфіг</div>
-        <div class="actions">
-          <button id="cfgSaveBtn" class="btn btn-primary">Зберегти</button>
-        </div>
+    <div id="tab-logs" class="tab">
+      <div class="row">
+        <button id="logs-refresh" class="btn">Refresh</button>
       </div>
-
-      <div class="grid grid-2">
-        <div class="field">
-          <label>latest_version</label>
-          <input id="cfgLatest" class="input" placeholder="напр. 2.3.3" />
-        </div>
-        <div class="field">
-          <label>force_update</label>
-          <input id="cfgForce" type="checkbox" />
-        </div>
-        <div class="field">
-          <label>maintenance</label>
-          <input id="cfgMaint" type="checkbox" />
-        </div>
-        <div class="field">
-          <label>maintenance_message</label>
-          <input id="cfgMaintMsg" class="input" placeholder="текст повідомлення" />
-        </div>
-        <div class="field span-2">
-          <label>update_description</label>
-          <textarea id="cfgDesc" class="textarea" rows="4" placeholder="release notes…"></textarea>
-        </div>
-        <div class="field span-2">
-          <label>update_links (JSON або коми)</label>
-          <textarea id="cfgLinks" class="textarea" rows="3" placeholder='["https://…"] або link1, link2'></textarea>
-        </div>
-      </div>
+      <table id="logs-table" class="table">
+        <thead><tr><th>ID</th><th>When</th><th>Action</th><th>Details</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </div>
-  </section>
+  </div>
 
-  <!-- Logs -->
-  <section id="tab-logs" class="tab">
-    <div class="card">
-      <div class="card__header">
-        <div class="title">Логи</div>
-        <div class="actions">
-          <select id="logPageSize" class="input">
-            <option>10</option><option selected>20</option><option>50</option><option>100</option>
-          </select>
-          <button id="logRefresh" class="btn">Оновити</button>
-        </div>
-      </div>
-
-      <div class="table-wrap">
-        <table class="table" id="logTable">
-          <thead>
-          <tr>
-            <th>ID</th>
-            <th>Коли</th>
-            <th>Подія</th>
-            <th>Meta</th>
-          </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-
-      <div class="pager">
-        <button class="btn" id="logPrev">←</button>
-        <span id="logPageInfo">1/1</span>
-        <button class="btn" id="logNext">→</button>
-      </div>
-    </div>
-  </section>
-</main>
-
-<div id="toast" class="toast" hidden></div>
-
-<script src="/admin.js"></script>
+  <script src="/admin.js"></script>
 </body>
 </html>
