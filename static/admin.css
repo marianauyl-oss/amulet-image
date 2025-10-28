@@ -1,0 +1,41 @@
+:root {
+  --bg: #f7fafc;
+  --card: #ffffff;
+  --fg: #0b1021;
+  --muted: #475569;
+  --border: #e2e8f0;
+  --accent: #2563eb;
+  --success: #16a34a;
+  --danger: #dc2626;
+}
+body.bg-body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, sans-serif;
+}
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.table th {
+  background: #f1f5f9;
+}
+.nav-tabs .nav-link.active {
+  color: var(--fg);
+  background: var(--card);
+  border-bottom: 2px solid var(--accent);
+}
+pre {
+  color: #00ff9d;
+  background: #0b1021;
+}
+.btn-outline-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.btn-outline-primary:hover {
+  background: var(--accent);
+  color: white;
+}
