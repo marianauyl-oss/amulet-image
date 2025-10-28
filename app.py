@@ -1,31 +1,150 @@
-import os, re, json, base64, secrets
-from datetime import datetime
-from functools import wraps
+# -*- coding: utf-8 -*-
+import os
+import json
+import datetime as dt
+from typing import List, Dict, Any, Optional
 
 from flask import (
-    Flask, request, jsonify, send_from_directory, make_response
+    Flask, request, jsonify, send_from_directory, abort, redirect, url_for
 )
 from flask_cors import CORS
-from sqlalchemy import text, inspect, or_
-from sqlalchemy.exc import IntegrityError
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func, or_
 
-from models import db, License, ApiKey, Config, Price, ActivityLog, utcnow
+# -----------------------------------------------------------------------------
+# Config / App
+# -----------------------------------------------------------------------------
+def _normalize_db_url(raw: str) -> str:
+    if not raw:
+        # Render persistent disk для SQLite
+        return "sqlite:////data/app.db"
+    # Додаємо явний драйвер psycopg3
+    if raw.startswith("postgres://"):
+        return raw.replace("postgres://", "postgresql+psycopg://", 1)
+    if raw.startswith("postgresql://") and "+psycopg" not in raw:
+        return raw.replace("postgresql://", "postgresql+psycopg://", 1)
+    return raw
 
-# ---------- App / DB ----------
-app = Flask(__name__, static_folder=None)
-CORS(app, resources={r"/admin_api/*": {"origins": "*"}})
+app = Flask(__name__, static_folder="static", static_url_path="")
+CORS(app)
 
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev_secret_change_me")
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-if not DATABASE_URL:
-    # SQLite за замовчуванням у файлі amulet.db в корені
-    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///amulet.db"
-else:
-    app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+DB_URL = _normalize_db_url(os.getenv("DATABASE_URL", "").strip())
+app.config["SQLALCHEMY_DATABASE_URI"] = DB_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["JSON_AS_ASCII"] = False
 
-db.init_app(app)
+db = SQLAlchemy(app)
 
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin")
+
+# -----------------------------------------------------------------------------
+# Models
+# -----------------------------------------------------------------------------
+class License(db.Model):
+    __tablename__ = "license"
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(128), unique=True, index=True, nullable=False)
+    mac_id = db.Column(db.String(64), nullable=True)
+    status = db.Column(db.String(32), nullable=False, default="active")  # active|inactive
+    credit = db.Column(db.Integer, nullable=False, default=0)
+    last_active = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=func.now())
+    updated_at = db.Column(db.DateTime, nullable=False, default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "key": self.key,
+            "mac_id": self.mac_id or "",
+            "status": self.status,
+            "credit": self.credit,
+            "last_active": self.last_active.isoformat() if self.last_active else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ApiKey(db.Model):
+    __tablename__ = "apikey"
+    id = db.Column(db.Integer, primary_key=True)
+    api_key = db.Column(db.String(256), unique=True, index=True, nullable=False)
+    status = db.Column(db.String(32), nullable=False, default="active")  # active|inactive
+    in_use = db.Column(db.Boolean, nullable=False, default=False)
+    last_used = db.Column(db.DateTime, nullable=True)
+    note = db.Column(db.String(255), nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=func.now())
+    updated_at = db.Column(db.DateTime, nullable=False, default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "api_key": self.api_key,
+            "status": self.status,
+            "in_use": bool(self.in_use),
+            "last_used": self.last_used.isoformat() if self.last_used else None,
+            "note": self.note or "",
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class Config(db.Model):
+    __tablename__ = "config"
+    id = db.Column(db.Integer, primary_key=True)
+    latest_version = db.Column(db.String(32), nullable=False, default="2.3.3")
+    force_update = db.Column(db.Boolean, nullable=False, default=False)
+    maintenance = db.Column(db.Boolean, nullable=False, default=False)
+    maintenance_message = db.Column(db.Text, nullable=True, default="")
+    update_description = db.Column(db.Text, nullable=True, default="")
+    update_links = db.Column(db.Text, nullable=True, default="[]")  # JSON array string
+    updated_at = db.Column(db.DateTime, nullable=False, default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        links = []
+        try:
+            links = json.loads(self.update_links or "[]")
+            if not isinstance(links, list):
+                links = [str(links)]
+        except Exception:
+            links = []
+        return {
+            "id": self.id,
+            "latest_version": self.latest_version,
+            "force_update": bool(self.force_update),
+            "maintenance": bool(self.maintenance),
+            "maintenance_message": self.maintenance_message or "",
+            "update_description": (self.update_description or "").strip(),
+            "update_links": links,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class Price(db.Model):
+    __tablename__ = "price"
+    id = db.Column(db.Integer, primary_key=True)
+    model = db.Column(db.String(128), unique=True, index=True, nullable=False)
+    price = db.Column(db.Integer, nullable=False, default=1)
+    updated_at = db.Column(db.DateTime, nullable=False, default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"id": self.id, "model": self.model, "price": self.price, "updated_at": self.updated_at.isoformat() if self.updated_at else None}
+
+
+class ActivityLog(db.Model):
+    __tablename__ = "activitylog"
+    id = db.Column(db.Integer, primary_key=True)
+    action = db.Column(db.String(64), nullable=False)
+    detail = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"id": self.id, "action": self.action, "detail": self.detail or "", "created_at": self.created_at.isoformat() if self.created_at else None}
+
+
+# -----------------------------------------------------------------------------
+# Bootstrap DB (create tables + default rows)
+# -----------------------------------------------------------------------------
 DEFAULT_PRICES = {
     "seedream-v4": 1,
     "flux-dev": 1,
@@ -35,583 +154,518 @@ DEFAULT_PRICES = {
     "classic-fast": 1,
 }
 
-# ---------- Auth ----------
-ADMIN_USER = os.getenv("ADMIN_USER", "admin")
-ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")  # альтернативний токен (заголовок X-Admin-Token або ?token=)
+with app.app_context():
+    db.create_all()
 
-def _basic_auth_ok():
-    # токен
-    tok = request.headers.get("X-Admin-Token") or request.args.get("token")
-    if ADMIN_TOKEN and tok and secrets.compare_digest(tok, ADMIN_TOKEN):
-        return True
+    # Ensure exactly one config row
+    if not Config.query.first():
+        db.session.add(Config(
+            latest_version="2.3.3",
+            force_update=False,
+            maintenance=False,
+            maintenance_message="",
+            update_description="",
+            update_links=json.dumps([]),
+        ))
+        db.session.commit()
 
-    # Basic
-    auth = request.authorization
-    if not auth:
-        return False
-    return secrets.compare_digest(auth.username or "", ADMIN_USER) and \
-           secrets.compare_digest(auth.password or "", ADMIN_PASS)
+    # Seed default prices if empty
+    if Price.query.count() == 0:
+        for m, p in DEFAULT_PRICES.items():
+            db.session.add(Price(model=m, price=int(p)))
+        db.session.commit()
 
-def admin_required(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if _basic_auth_ok():
-            return fn(*args, **kwargs)
-        resp = make_response("Auth required", 401)
-        resp.headers["WWW-Authenticate"] = 'Basic realm="Amulet Admin"'
-        return resp
-    return wrapper
 
-# ---------- Helpers ----------
-def fmt_dt(dt):
-    if not dt: return ""
-    if isinstance(dt, str): return dt
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
-
-def log_event(event, meta=None):
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def _log(action: str, detail: str = "") -> None:
     try:
-        db.session.add(ActivityLog(event=event, meta=json.dumps(meta or {}, ensure_ascii=False)))
+        db.session.add(ActivityLog(action=action, detail=detail[:2000]))
         db.session.commit()
     except Exception:
         db.session.rollback()
 
-def paginate(query, page, page_size):
-    total = query.count()
-    pages = max(1, (total + page_size - 1) // page_size)
-    items = query.offset((page-1)*page_size).limit(page_size).all()
-    return total, pages, items
+def _require_auth():
+    auth = request.authorization
+    if not auth or auth.username != ADMIN_USER or auth.password != ADMIN_PASS:
+        return False
+    return True
 
-def ensure_schema():
-    """Створює таблиці та додає відсутні колонки (для старих SQLite)."""
-    with app.app_context():
-        db.create_all()
+def admin_required(fn):
+    from functools import wraps
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not _require_auth():
+            resp = jsonify({"ok": False, "msg": "Unauthorized"})
+            resp.status_code = 401
+            resp.headers["WWW-Authenticate"] = 'Basic realm="Admin"'
+            return resp
+        return fn(*args, **kwargs)
+    return wrapper
 
-        insp = inspect(db.engine)
 
-        def add_col_if_missing(table, coldef_sql):
-            # SQLite/PG: проста перевірка — якщо колонки нема, додаємо
-            cols = {c["name"] for c in insp.get_columns(table)}
-            name = coldef_sql.split()[0].strip('"').strip()
-            if name not in cols:
-                with db.engine.begin() as conn:
-                    conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {coldef_sql}'))
-
-        # license
-        if insp.has_table("license"):
-            add_col_if_missing("license", '"mac_id" VARCHAR(64)')
-            add_col_if_missing("license", '"status" VARCHAR(32) DEFAULT \'active\'')
-            add_col_if_missing("license", '"credit" INTEGER DEFAULT 0')
-            add_col_if_missing("license", '"last_active" TIMESTAMP')
-
-        # apikey
-        if insp.has_table("apikey"):
-            add_col_if_missing("apikey", '"status" VARCHAR(16) DEFAULT \'active\'')
-            # boolean як INTEGER для sqlite сумісності
-            add_col_if_missing("apikey", '"in_use" BOOLEAN DEFAULT 0')
-            add_col_if_missing("apikey", '"last_used" TIMESTAMP')
-            add_col_if_missing("apikey", '"note" VARCHAR(255)')
-
-        # config
-        if insp.has_table("config"):
-            add_col_if_missing("config", '"latest_version" VARCHAR(32) DEFAULT \'2.3.3\'')
-            add_col_if_missing("config", '"force_update" BOOLEAN DEFAULT 0')
-            add_col_if_missing("config", '"maintenance" BOOLEAN DEFAULT 0')
-            add_col_if_missing("config", '"maintenance_message" VARCHAR(500) DEFAULT \'\'')
-            add_col_if_missing("config", '"update_description" TEXT DEFAULT \'\'')
-            add_col_if_missing("config", '"update_links" TEXT DEFAULT \'[]\'')
-            add_col_if_missing("config", '"updated_at" TIMESTAMP')
-
-        # price
-        if insp.has_table("price"):
-            add_col_if_missing("price", '"model" VARCHAR(80)')
-            add_col_if_missing("price", '"price" INTEGER')
-
-        # ініціалізація config
-        if db.session.query(Config).count() == 0:
-            cfg = Config(
-                latest_version="2.3.3",
-                force_update=False,
-                maintenance=False,
-                maintenance_message="",
-                update_description="",
-                update_links="[]",
-                updated_at=utcnow()
-            )
-            db.session.add(cfg)
-            db.session.commit()
-
-        # Якщо таблиця price порожня — заповнюємо дефолтами
-        if db.session.query(Price).count() == 0:
-            for m, p in DEFAULT_PRICES.items():
-                db.session.add(Price(model=m, price=p))
-            db.session.commit()
-
-ensure_schema()
-
-# ---------- Static (захищаємо, щоб спливла basic-auth) ----------
+# -----------------------------------------------------------------------------
+# Static / Health
+# -----------------------------------------------------------------------------
 @app.route("/")
-@admin_required
-def root():
-    # віддай admin.html зі статичної папки "static" (поклади туди свої admin.html/admin.js/admin.css)
-    return send_from_directory("static", "admin.html")
+def index():
+    # зручно одразу відкривати адмінку
+    return redirect(url_for("admin_html"))
 
-@app.route("/admin.css")
-@admin_required
-def css():
-    return send_from_directory("static", "admin.css")
+@app.route("/admin")
+def admin_html():
+    return send_from_directory(app.static_folder, "admin.html")
 
-@app.route("/admin.js")
-@admin_required
-def js():
-    return send_from_directory("static", "admin.js")
-
-# Health
-@app.get("/healthz")
+@app.route("/healthz")
 def health():
-    return jsonify(ok=True, time=fmt_dt(datetime.utcnow()))
+    return jsonify({"ok": True, "time": dt.datetime.utcnow().isoformat(), "db": DB_URL.split(":")[0]})
 
-# ---------- Admin API ----------
-@app.get("/admin_api/login")
-@admin_required
-def admin_login_ping():
-    return jsonify(ok=True, user=ADMIN_USER)
 
-# ---- Licenses ----
-@app.get("/admin_api/licenses")
+# -----------------------------------------------------------------------------
+# Admin Auth
+# -----------------------------------------------------------------------------
+@app.route("/admin_api/login")
 @admin_required
-def admin_licenses():
-    page = int(request.args.get("page", 1))
-    page_size = min(100, int(request.args.get("page_size", 20)))
-    q = (request.args.get("q") or "").strip()
-    status = (request.args.get("status") or "").strip().lower()
+def admin_login():
+    return jsonify({"ok": True})
+
+
+# -----------------------------------------------------------------------------
+# Licenses
+# -----------------------------------------------------------------------------
+@app.route("/admin_api/licenses", methods=["GET"])
+@admin_required
+def admin_licenses_list():
+    q = request.args.get("q", "").strip()
+    status = request.args.get("status", "").strip().lower()
+    min_credit = request.args.get("min_credit", "").strip()
+    max_credit = request.args.get("max_credit", "").strip()
 
     query = License.query
     if q:
-        qs = f"%{q}%"
-        query = query.filter(or_(License.key.ilike(qs),
-                                 License.mac_id.ilike(qs)))
-    if status:
+        like = f"%{q}%"
+        query = query.filter(or_(License.key.ilike(like), License.mac_id.ilike(like)))
+    if status in ("active", "inactive"):
         query = query.filter(License.status == status)
+    if min_credit.isdigit():
+        query = query.filter(License.credit >= int(min_credit))
+    if max_credit.isdigit():
+        query = query.filter(License.credit <= int(max_credit))
 
-    query = query.order_by(License.id.desc())
-    total, pages, items = paginate(query, page, page_size)
-    data = []
-    for it in items:
-        data.append({
-            "id": it.id,
-            "key": it.key,
-            "mac_id": it.mac_id,
-            "status": it.status,
-            "credit": it.credit,
-            "last_active": fmt_dt(it.last_active),
-            "created_at": fmt_dt(it.created_at),
-            "updated_at": fmt_dt(it.updated_at),
-        })
-    return jsonify(ok=True, page=page, pages=pages, total=total, items=data)
+    items = query.order_by(License.id.desc()).all()
+    return jsonify({"ok": True, "items": [i.to_dict() for i in items]})
 
-@app.post("/admin_api/licenses")
+@app.route("/admin_api/licenses", methods=["POST"])
 @admin_required
-def admin_license_create():
-    body = request.get_json(force=True, silent=True) or {}
-    key = (body.get("key") or "").strip()
-    if not key:
-        # простий генератор ключа XXXX-XXXX-XXXX
-        import random, string
-        def chunk():
-            return "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
-        key = f"{chunk()}-{chunk()}-{chunk()}"
-
-    lic = License(
-        key=key,
-        mac_id=(body.get("mac_id") or "").strip() or None,
-        status=(body.get("status") or "active").strip(),
-        credit=int(body.get("credit") or 0)
-    )
-    db.session.add(lic)
-    try:
-        db.session.commit()
-    except IntegrityError:
-        db.session.rollback()
-        return jsonify(ok=False, msg="Key already exists"), 400
-
-    log_event("license.create", {"id": lic.id, "key": lic.key})
-    return jsonify(ok=True, id=lic.id)
-
-@app.put("/admin_api/licenses/<int:lic_id>")
-@admin_required
-def admin_license_update(lic_id):
-    lic = License.query.get_or_404(lic_id)
-    body = request.get_json(force=True, silent=True) or {}
-    if "key" in body:
-        newkey = (body.get("key") or "").strip()
-        if newkey and newkey != lic.key:
-            lic.key = newkey
-    if "mac_id" in body:
-        lic.mac_id = (body.get("mac_id") or "").strip() or None
-    if "status" in body:
-        lic.status = (body.get("status") or "active").strip()
-    if "credit" in body:
-        lic.credit = int(body.get("credit") or lic.credit)
-    db.session.commit()
-    log_event("license.update", {"id": lic.id})
-    return jsonify(ok=True)
-
-@app.delete("/admin_api/licenses/<int:lic_id>")
-@admin_required
-def admin_license_delete(lic_id):
-    lic = License.query.get_or_404(lic_id)
-    db.session.delete(lic)
-    db.session.commit()
-    log_event("license.delete", {"id": lic_id})
-    return jsonify(ok=True)
-
-@app.post("/admin_api/licenses/bulk")
-@admin_required
-def admin_license_bulk():
+def admin_licenses_create():
     """
     Приймає:
-      - multipart/form-data з 'file' (txt: один ключ у рядку) і опц. 'status', 'credit'
-      - або JSON: {"keys": ["AAA-BBB-CCC", ...], "status":"active", "credit":10}
+      - JSON: { "keys": "AAA\nBBB\nCCC", "status": "active", "credit": 100 }
+      - або form-data / x-www-form-urlencoded з тими ж полями
+      - також підтримує upload файлу txt через поле 'file'
     """
-    created, skipped = 0, 0
-    status = (request.form.get("status") or request.args.get("status") or "active").strip()
-    credit = int(request.form.get("credit") or request.args.get("credit") or 0)
+    payload = request.get_json(silent=True) or {}
+    text_keys = ""
+    status = (payload.get("status") or request.form.get("status") or "active").strip().lower()
+    credit_val = payload.get("credit", request.form.get("credit", 0))
+    try:
+        credit = int(credit_val)
+    except Exception:
+        credit = 0
 
-    keys = []
-    if "file" in request.files:
-        content = request.files["file"].read().decode("utf-8", errors="ignore")
-        for line in content.splitlines():
-            k = line.strip()
-            if k:
-                keys.append(k)
+    # file?
+    if "file" in request.files and request.files["file"]:
+        try:
+            text_keys = request.files["file"].read().decode("utf-8", errors="ignore")
+        except Exception:
+            text_keys = ""
     else:
-        body = request.get_json(force=True, silent=True) or {}
-        keys = [str(x).strip() for x in body.get("keys", []) if str(x).strip()]
-        credit = int(body.get("credit") or credit)
-        status = (body.get("status") or status).strip() or "active"
+        # keys string or single key
+        text_keys = (payload.get("keys") or request.form.get("keys") or "").strip()
+        if not text_keys:
+            one_key = (payload.get("key") or request.form.get("key") or "").strip()
+            if one_key:
+                text_keys = one_key
 
+    if not text_keys:
+        return jsonify({"ok": False, "msg": "No keys provided"}), 400
+
+    lines = [k.strip() for k in text_keys.replace("\r", "").split("\n")]
+    keys = [k for k in lines if k]
+    if not keys:
+        return jsonify({"ok": False, "msg": "Empty keys"}), 400
+
+    added, updated, skipped = 0, 0, 0
     for k in keys:
-        if not k: continue
-        if db.session.query(License.id).filter_by(key=k).first():
-            skipped += 1
-            continue
-        db.session.add(License(key=k, status=status, credit=credit))
-        created += 1
-    db.session.commit()
-    log_event("license.bulk", {"created": created, "skipped": skipped})
-    return jsonify(ok=True, created=created, skipped=skipped)
+        ex = License.query.filter_by(key=k).first()
+        if ex:
+            # оновлюємо лише якщо явний кредит/статус передано
+            changed = False
+            if status in ("active", "inactive") and ex.status != status:
+                ex.status = status
+                changed = True
+            if credit is not None and isinstance(credit, int) and credit > ex.credit:
+                # якщо переданий credit більший — встановимо (не зменшуємо тут)
+                ex.credit = credit
+                changed = True
+            if changed:
+                updated += 1
+            else:
+                skipped += 1
+        else:
+            db.session.add(License(key=k, status=(status if status in ("active", "inactive") else "active"), credit=credit))
+            added += 1
+    try:
+        db.session.commit()
+        _log("licenses.create_bulk", f"added={added}, updated={updated}, skipped={skipped}")
+        return jsonify({"ok": True, "added": added, "updated": updated, "skipped": skipped})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
 
-@app.post("/admin_api/licenses/<int:lic_id>/credit_adjust")
+@app.route("/admin_api/licenses/<int:lid>", methods=["PATCH"])
 @admin_required
-def admin_license_credit_adjust(lic_id):
-    body = request.get_json(force=True, silent=True) or {}
-    delta = int(body.get("delta") or 0)
-    lic = License.query.get_or_404(lic_id)
-    lic.credit = max(0, int(lic.credit) + delta)
-    db.session.commit()
-    log_event("license.credit_adjust", {"id": lic_id, "delta": delta})
-    return jsonify(ok=True, credit=lic.credit)
+def admin_license_patch(lid: int):
+    row = License.query.get(lid)
+    if not row:
+        return jsonify({"ok": False, "msg": "Not found"}), 404
+    payload = request.get_json(silent=True) or {}
 
-# ---- API Keys ----
-@app.get("/admin_api/apikeys")
+    status = (payload.get("status") or "").strip().lower()
+    if status in ("active", "inactive"):
+        row.status = status
+
+    if "credit" in payload:
+        try:
+            row.credit = int(payload.get("credit"))
+        except Exception:
+            pass
+    if "delta" in payload:
+        try:
+            row.credit = max(0, int(row.credit) + int(payload.get("delta")))
+        except Exception:
+            pass
+    if "mac_id" in payload:
+        row.mac_id = (payload.get("mac_id") or "").strip()
+    if payload.get("unbind_mac"):
+        row.mac_id = None
+
+    try:
+        db.session.commit()
+        _log("licenses.patch", f"id={row.id}")
+        return jsonify({"ok": True, "item": row.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+@app.route("/admin_api/licenses/<int:lid>", methods=["DELETE"])
 @admin_required
-def admin_apikeys():
-    page = int(request.args.get("page", 1))
-    page_size = min(100, int(request.args.get("page_size", 20)))
-    q = (request.args.get("q") or "").strip()
-    status = (request.args.get("status") or "").strip().lower()
+def admin_license_delete(lid: int):
+    row = License.query.get(lid)
+    if not row:
+        return jsonify({"ok": False, "msg": "Not found"}), 404
+    try:
+        db.session.delete(row)
+        db.session.commit()
+        _log("licenses.delete", f"id={lid}")
+        return jsonify({"ok": True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+# -----------------------------------------------------------------------------
+# API Keys (з масовим імпортом .txt)
+# -----------------------------------------------------------------------------
+@app.route("/admin_api/apikeys", methods=["GET"])
+@admin_required
+def admin_apikeys_list():
+    q = request.args.get("q", "").strip()
+    status = request.args.get("status", "").strip().lower()
+    in_use = request.args.get("in_use", "").strip().lower()
 
     query = ApiKey.query
     if q:
-        qs = f"%{q}%"
-        query = query.filter(or_(ApiKey.api_key.ilike(qs),
-                                 ApiKey.note.ilike(qs)))
-    if status:
+        like = f"%{q}%"
+        query = query.filter(or_(ApiKey.api_key.ilike(like), ApiKey.note.ilike(like)))
+    if status in ("active", "inactive"):
         query = query.filter(ApiKey.status == status)
+    if in_use in ("yes", "true", "1"):
+        query = query.filter(ApiKey.in_use.is_(True))
+    elif in_use in ("no", "false", "0"):
+        query = query.filter(ApiKey.in_use.is_(False))
 
-    query = query.order_by(ApiKey.id.desc())
-    total, pages, items = paginate(query, page, page_size)
-    data = []
-    for it in items:
-        data.append({
-            "id": it.id,
-            "api_key": it.api_key,
-            "status": it.status,
-            "in_use": bool(it.in_use),
-            "last_used": fmt_dt(it.last_used),
-            "note": it.note or "",
-            "created_at": fmt_dt(it.created_at),
-            "updated_at": fmt_dt(it.updated_at),
-        })
-    return jsonify(ok=True, page=page, pages=pages, total=total, items=data)
+    items = query.order_by(ApiKey.id.desc()).all()
+    return jsonify({"ok": True, "items": [i.to_dict() for i in items]})
 
-@app.post("/admin_api/apikeys")
+def _parse_keys_text(text: str) -> List[str]:
+    lines = [x.strip() for x in (text or "").replace("\r", "").split("\n")]
+    return [x for x in lines if x]
+
+@app.route("/admin_api/apikeys", methods=["POST"])
 @admin_required
-def admin_apikey_create():
-    body = request.get_json(force=True, silent=True) or {}
-    api_key = (body.get("api_key") or "").strip()
-    if not api_key:
-        return jsonify(ok=False, msg="api_key required"), 400
-    ak = ApiKey(api_key=api_key,
-                status=(body.get("status") or "active").strip(),
-                note=(body.get("note") or "").strip() or None)
-    db.session.add(ak)
-    try:
-        db.session.commit()
-    except IntegrityError:
-        db.session.rollback()
-        return jsonify(ok=False, msg="api_key exists"), 400
-    log_event("apikey.create", {"id": ak.id})
-    return jsonify(ok=True, id=ak.id)
-
-@app.put("/admin_api/apikeys/<int:key_id>")
-@admin_required
-def admin_apikey_update(key_id):
-    ak = ApiKey.query.get_or_404(key_id)
-    body = request.get_json(force=True, silent=True) or {}
-    if "api_key" in body:
-        v = (body.get("api_key") or "").strip()
-        if v and v != ak.api_key:
-            ak.api_key = v
-    if "status" in body:
-        ak.status = (body.get("status") or "active").strip()
-    if "in_use" in body:
-        ak.in_use = bool(body.get("in_use"))
-    if "note" in body:
-        ak.note = (body.get("note") or "").strip() or None
-    db.session.commit()
-    log_event("apikey.update", {"id": key_id})
-    return jsonify(ok=True)
-
-@app.delete("/admin_api/apikeys/<int:key_id>")
-@admin_required
-def admin_apikey_delete(key_id):
-    ak = ApiKey.query.get_or_404(key_id)
-    db.session.delete(ak)
-    db.session.commit()
-    log_event("apikey.delete", {"id": key_id})
-    return jsonify(ok=True)
-
-@app.post("/admin_api/apikeys/bulk")
-@admin_required
-def admin_apikey_bulk():
+def admin_apikeys_create():
     """
-    TXT: кожен ключ у новому рядку.
-    Приймає multipart 'file' або JSON {"keys":[...], "status":"active"}
+    JSON/Form:
+      - "keys": "k1\nk2\nk3" або "key": "single"
+      - "status": "active|inactive" (default active)
+      - "note": "..."
     """
-    created, skipped = 0, 0
-    status = (request.form.get("status") or request.args.get("status") or "active").strip()
-    keys = []
-    if "file" in request.files:
-        content = request.files["file"].read().decode("utf-8", errors="ignore")
-        for line in content.splitlines():
-            v = line.strip()
-            if v: keys.append(v)
-    else:
-        body = request.get_json(force=True, silent=True) or {}
-        keys = [str(x).strip() for x in body.get("keys", []) if str(x).strip()]
-        status = (body.get("status") or status).strip() or "active"
+    payload = request.get_json(silent=True) or {}
+    status = (payload.get("status") or request.form.get("status") or "active").strip().lower()
+    note = (payload.get("note") or request.form.get("note") or "").strip()
 
+    text_keys = (payload.get("keys") or request.form.get("keys") or "").strip()
+    if not text_keys:
+        one = (payload.get("key") or request.form.get("key") or "").strip()
+        text_keys = one
+
+    keys = _parse_keys_text(text_keys)
+    if not keys:
+        return jsonify({"ok": False, "msg": "No keys provided"}), 400
+
+    added, skipped = 0, 0
     for k in keys:
-        if db.session.query(ApiKey.id).filter_by(api_key=k).first():
+        if ApiKey.query.filter_by(api_key=k).first():
             skipped += 1
             continue
-        db.session.add(ApiKey(api_key=k, status=status, in_use=False))
-        created += 1
-    db.session.commit()
-    log_event("apikey.bulk", {"created": created, "skipped": skipped})
-    return jsonify(ok=True, created=created, skipped=skipped)
+        db.session.add(ApiKey(api_key=k, status=(status if status in ("active", "inactive") else "active"), note=note))
+        added += 1
+    try:
+        db.session.commit()
+        _log("apikeys.create_bulk", f"added={added}, skipped={skipped}")
+        return jsonify({"ok": True, "added": added, "skipped": skipped})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
 
-# ---- Prices (Models) ----
-@app.get("/admin_api/prices")
+@app.route("/admin_api/apikeys/upload", methods=["POST"])
 @admin_required
-def admin_prices():
-    page = int(request.args.get("page", 1))
-    page_size = min(200, int(request.args.get("page_size", 50)))
-    q = (request.args.get("q") or "").strip()
-    query = Price.query
-    if q:
-        qs = f"%{q}%"
-        query = query.filter(Price.model.ilike(qs))
-    query = query.order_by(Price.model.asc())
-    total, pages, items = paginate(query, page, page_size)
-    data = [{"id": it.id, "model": it.model, "price": it.price,
-             "created_at": fmt_dt(it.created_at), "updated_at": fmt_dt(it.updated_at)} for it in items]
-    return jsonify(ok=True, page=page, pages=pages, total=total, items=data)
-
-@app.post("/admin_api/prices")
-@admin_required
-def admin_price_upsert():
-    body = request.get_json(force=True, silent=True) or {}
-    model = (body.get("model") or "").strip()
-    price = int(body.get("price") or 0)
-    if not model or price <= 0:
-        return jsonify(ok=False, msg="model and positive price required"), 400
-    p = Price.query.filter_by(model=model).first()
-    if p:
-        p.price = price
-    else:
-        p = Price(model=model, price=price)
-        db.session.add(p)
-    db.session.commit()
-    log_event("price.upsert", {"model": model, "price": price})
-    return jsonify(ok=True, id=p.id, model=p.model, price=p.price)
-
-@app.put("/admin_api/prices/<int:price_id>")
-@admin_required
-def admin_price_update(price_id):
-    p = Price.query.get_or_404(price_id)
-    body = request.get_json(force=True, silent=True) or {}
-    if "model" in body:
-        v = (body.get("model") or "").strip()
-        if v and v != p.model:
-            if db.session.query(Price.id).filter_by(model=v).first():
-                return jsonify(ok=False, msg="model exists"), 400
-            p.model = v
-    if "price" in body:
-        pv = int(body.get("price") or 0)
-        if pv > 0:
-            p.price = pv
-    db.session.commit()
-    log_event("price.update", {"id": p.id})
-    return jsonify(ok=True)
-
-@app.delete("/admin_api/prices/<int:price_id>")
-@admin_required
-def admin_price_delete(price_id):
-    p = Price.query.get_or_404(price_id)
-    db.session.delete(p)
-    db.session.commit()
-    log_event("price.delete", {"id": price_id})
-    return jsonify(ok=True)
-
-@app.post("/admin_api/prices/bulk")
-@admin_required
-def admin_price_bulk():
+def admin_apikeys_upload():
     """
-    TXT: рядок формату model=price або model,price або 'model price'
+    Upload .txt file (field name: 'file'), 1 ключ у рядку.
     """
-    created, updated, skipped = 0, 0, 0
-    pairs = []
-    if "file" in request.files:
-        content = request.files["file"].read().decode("utf-8", errors="ignore")
-        lines = content.splitlines()
-    else:
-        body = request.get_json(force=True, silent=True) or {}
-        raw = body.get("data") or ""
-        lines = str(raw).splitlines()
+    if "file" not in request.files or not request.files["file"]:
+        return jsonify({"ok": False, "msg": "No file"}), 400
+    try:
+        text = request.files["file"].read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 400
+    keys = _parse_keys_text(text)
+    if not keys:
+        return jsonify({"ok": False, "msg": "Empty file"}), 400
 
-    for ln in lines:
-        ln = ln.strip()
-        if not ln: continue
-        if "=" in ln:
-            m, p = ln.split("=", 1)
-        elif "," in ln:
-            m, p = ln.split(",", 1)
-        else:
-            parts = ln.split()
-            if len(parts) < 2:
-                skipped += 1; continue
-            m, p = parts[0], parts[1]
-        model = m.strip()
+    added, skipped = 0, 0
+    for k in keys:
+        if ApiKey.query.filter_by(api_key=k).first():
+            skipped += 1
+            continue
+        db.session.add(ApiKey(api_key=k, status="active", in_use=False))
+        added += 1
+    try:
+        db.session.commit()
+        _log("apikeys.upload", f"added={added}, skipped={skipped}")
+        return jsonify({"ok": True, "added": added, "skipped": skipped})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+@app.route("/admin_api/apikeys/<int:aid>", methods=["PATCH"])
+@admin_required
+def admin_apikey_patch(aid: int):
+    row = ApiKey.query.get(aid)
+    if not row:
+        return jsonify({"ok": False, "msg": "Not found"}), 404
+    payload = request.get_json(silent=True) or {}
+
+    status = (payload.get("status") or "").strip().lower()
+    if status in ("active", "inactive"):
+        row.status = status
+    if "in_use" in payload:
+        row.in_use = bool(payload.get("in_use"))
+    if "note" in payload:
+        row.note = (payload.get("note") or "").strip()
+    if payload.get("touch_last_used"):
+        row.last_used = dt.datetime.utcnow()
+
+    try:
+        db.session.commit()
+        _log("apikeys.patch", f"id={row.id}")
+        return jsonify({"ok": True, "item": row.to_dict()})
+    except Exception as e:
+        db.session.rollback
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+@app.route("/admin_api/apikeys/<int:aid>", methods=["DELETE"])
+@admin_required
+def admin_apikey_delete(aid: int):
+    row = ApiKey.query.get(aid)
+    if not row:
+        return jsonify({"ok": False, "msg": "Not found"}), 404
+    try:
+        db.session.delete(row)
+        db.session.commit()
+        _log("apikeys.delete", f"id={aid}")
+        return jsonify({"ok": True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+# -----------------------------------------------------------------------------
+# Prices (вкладка замість Voices)
+# -----------------------------------------------------------------------------
+@app.route("/admin_api/prices", methods=["GET"])
+@admin_required
+def admin_prices_list():
+    items = Price.query.order_by(Price.model.asc()).all()
+    return jsonify({"ok": True, "items": [i.to_dict() for i in items]})
+
+@app.route("/admin_api/prices", methods=["POST"])
+@admin_required
+def admin_prices_upsert():
+    """
+    JSON:
+      - single: { "model": "flux-dev", "price": 2 }
+      - bulk:   { "items": [ { "model": "...", "price": 1 }, ... ] }
+    """
+    payload = request.get_json(silent=True) or {}
+    items = []
+    if "items" in payload and isinstance(payload["items"], list):
+        items = payload["items"]
+    elif "model" in payload and "price" in payload:
+        items = [ {"model": payload.get("model"), "price": payload.get("price")} ]
+    else:
+        return jsonify({"ok": False, "msg": "Provide model/price or items[]"}), 400
+
+    upserted, errors = 0, []
+    for it in items:
+        model = str(it.get("model") or "").strip()
         try:
-            price = int(str(p).strip())
+            price = int(it.get("price"))
         except Exception:
-            skipped += 1; continue
-        if not model or price <= 0:
-            skipped += 1; continue
-        pairs.append((model, price))
-
-    for model, price in pairs:
-        obj = Price.query.filter_by(model=model).first()
-        if obj:
-            if obj.price != price:
-                obj.price = price
-                updated += 1
+            price = None
+        if not model or price is None or price <= 0:
+            errors.append({"model": model, "msg": "invalid"})
+            continue
+        row = Price.query.filter_by(model=model).first()
+        if row:
+            row.price = price
         else:
             db.session.add(Price(model=model, price=price))
-            created += 1
-    db.session.commit()
-    log_event("price.bulk", {"created": created, "updated": updated, "skipped": skipped})
-    return jsonify(ok=True, created=created, updated=updated, skipped=skipped)
+        upserted += 1
+    try:
+        db.session.commit()
+        _log("prices.upsert", f"count={upserted}")
+        return jsonify({"ok": True, "upserted": upserted, "errors": errors})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
 
-@app.post("/admin_api/prices/defaults")
+@app.route("/admin_api/prices/<string:model>", methods=["DELETE"])
 @admin_required
-def admin_price_defaults():
-    touched = 0
-    for m, p in DEFAULT_PRICES.items():
-        obj = Price.query.filter_by(model=m).first()
-        if obj:
-            continue
-        db.session.add(Price(model=m, price=p))
-        touched += 1
-    db.session.commit()
-    log_event("price.defaults", {"added": touched})
-    return jsonify(ok=True, added=touched)
+def admin_prices_delete(model: str):
+    row = Price.query.filter_by(model=model).first()
+    if not row:
+        return jsonify({"ok": False, "msg": "Not found"}), 404
+    try:
+        db.session.delete(row)
+        db.session.commit()
+        _log("prices.delete", model)
+        return jsonify({"ok": True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
 
-# ---- Config ----
-@app.get("/admin_api/config")
+
+# -----------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------
+@app.route("/admin_api/config", methods=["GET"])
 @admin_required
 def admin_config_get():
-    cfg = Config.query.order_by(Config.id.asc()).first()
-    if not cfg:
-        cfg = Config()
-        db.session.add(cfg)
-        db.session.commit()
-    return jsonify(ok=True, config={
-        "latest_version": cfg.latest_version,
-        "force_update": bool(cfg.force_update),
-        "maintenance": bool(cfg.maintenance),
-        "maintenance_message": cfg.maintenance_message or "",
-        "update_description": cfg.update_description or "",
-        "update_links": cfg.update_links or "[]",
-        "updated_at": fmt_dt(cfg.updated_at or cfg.updated_at),
-    })
+    cfg = Config.query.first()
+    return jsonify({"ok": True, "item": cfg.to_dict()})
 
-@app.post("/admin_api/config")
+@app.route("/admin_api/config", methods=["POST"])
 @admin_required
 def admin_config_set():
-    body = request.get_json(force=True, silent=True) or {}
-    cfg = Config.query.order_by(Config.id.asc()).first()
+    payload = request.get_json(silent=True) or {}
+    cfg = Config.query.first()
     if not cfg:
         cfg = Config()
         db.session.add(cfg)
 
-    if "latest_version" in body:
-        cfg.latest_version = str(body.get("latest_version") or cfg.latest_version)
-    if "force_update" in body:
-        cfg.force_update = bool(body.get("force_update"))
-    if "maintenance" in body:
-        cfg.maintenance = bool(body.get("maintenance"))
-    if "maintenance_message" in body:
-        cfg.maintenance_message = str(body.get("maintenance_message") or "")
-    if "update_description" in body:
-        cfg.update_description = str(body.get("update_description") or "")
-    if "update_links" in body:
-        # збережемо як JSON-рядок
-        links = body.get("update_links")
-        if isinstance(links, list):
-            cfg.update_links = json.dumps(links, ensure_ascii=False)
-        else:
-            cfg.update_links = str(links or "[]")
-    cfg.updated_at = utcnow()
-    db.session.commit()
-    log_event("config.update", {})
-    return jsonify(ok=True)
+    if "latest_version" in payload:
+        cfg.latest_version = str(payload.get("latest_version") or cfg.latest_version)
+    if "force_update" in payload:
+        cfg.force_update = bool(payload.get("force_update"))
+    if "maintenance" in payload:
+        cfg.maintenance = bool(payload.get("maintenance"))
+    if "maintenance_message" in payload:
+        cfg.maintenance_message = str(payload.get("maintenance_message") or "")
+    if "update_description" in payload:
+        cfg.update_description = str(payload.get("update_description") or "")
 
-# ---- Activity ----
-@app.get("/admin_api/logs")
+    if "update_links" in payload:
+        links = payload.get("update_links")
+        if isinstance(links, list):
+            try:
+                cfg.update_links = json.dumps(links, ensure_ascii=False)
+            except Exception:
+                cfg.update_links = "[]"
+        elif isinstance(links, str):
+            # приймаємо або JSON, або коми
+            s = links.strip()
+            if s.startswith("["):
+                try:
+                    json.loads(s)  # валідність
+                    cfg.update_links = s
+                except Exception:
+                    cfg.update_links = "[]"
+            else:
+                arr = [x.strip() for x in s.split(",") if x.strip()]
+                cfg.update_links = json.dumps(arr, ensure_ascii=False)
+
+    try:
+        db.session.commit()
+        _log("config.set", "updated")
+        return jsonify({"ok": True, "item": cfg.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+@app.route("/admin_api/logs", methods=["GET"])
 @admin_required
 def admin_logs():
-    page = int(request.args.get("page", 1))
-    page_size = min(100, int(request.args.get("page_size", 20)))
-    query = ActivityLog.query.order_by(ActivityLog.id.desc())
-    total, pages, items = paginate(query, page, page_size)
-    data = [{"id": it.id, "when": fmt_dt(it.when), "event": it.event, "meta": it.meta or ""} for it in items]
-    return jsonify(ok=True, page=page, pages=pages, total=total, items=data)
+    limit = request.args.get("limit", "100")
+    try:
+        n = max(1, min(500, int(limit)))
+    except Exception:
+        n = 100
+    rows = ActivityLog.query.order_by(ActivityLog.id.desc()).limit(n).all()
+    return jsonify({"ok": True, "items": [r.to_dict() for r in rows]})
 
-# ---------- Run ----------
+
+# -----------------------------------------------------------------------------
+# Run (local)
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # Локальний запуск: DEBUG + SQLite у ./app.db
+    if not os.getenv("DATABASE_URL"):
+        app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///app.db"
+        with app.app_context():
+            db.create_all()
+            if Price.query.count() == 0:
+                for m, p in DEFAULT_PRICES.items():
+                    db.session.add(Price(model=m, price=int(p)))
+                db.session.commit()
+            if not Config.query.first():
+                db.session.add(Config())
+                db.session.commit()
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
